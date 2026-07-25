@@ -1337,7 +1337,10 @@ button.is-loading { cursor: wait; }
 .rating-curve-card em { font: 800 12px/1 ui-monospace, monospace; font-style: normal; }
 .rating-curve-card em.up { color: var(--green); }
 .rating-curve-card em.down { color: var(--red); }
-.rating-curve-card canvas { position: absolute; inset: 32px 0 0; width: 100%; height: 106px; display: block; }
+.rating-curve-card svg { position: absolute; inset: 32px 0 0; width: 100%; height: 106px; display: block; }
+.rating-dot { cursor: pointer; }
+.rating-dot circle:last-child { transition: r 150ms ease; }
+.rating-dot:hover circle:last-child { r: 4.5; }
 
 .ban-announcement {
   display: grid;
