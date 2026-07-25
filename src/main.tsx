@@ -3,6 +3,7 @@ import Swal from "sweetalert2";
 import "sweetalert2/dist/sweetalert2.min.css";
 import type VditorType from "vditor";
 import "vditor/dist/index.css";
+import Chart from "chart.js/auto";
 import type { ComponentChildren, JSX } from "preact";
 import { render } from "preact";
 import { useEffect, useRef } from "preact/hooks";
@@ -2712,6 +2713,8 @@ const BanOverlay = () => {
 };
 
 const RatingCurve = ({ name }: { name: string }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const chartRef = useRef<Chart | null>(null);
   const user = userRecordFor(name);
   const raw = user?.ratingHistory?.length ? user.ratingHistory.slice(-24) : [{ at: Date.now(), rating: user?.rating ?? 1300 }];
   const values = raw.map((point) => point.rating).sort((a, b) => a - b);
@@ -2733,49 +2736,97 @@ const RatingCurve = ({ name }: { name: string }) => {
   const first = history[0].rating;
   const current = history.at(-1)?.rating ?? first;
 
-  const W = 360;
-  const H = 108;
-  const PAD_BOTTOM = 10;
-  const PAD_TOP = 12;
-  const plotH = H - PAD_BOTTOM - PAD_TOP;
-  const xOf = (i: number): number => history.length <= 1 ? W / 2 : (i / (history.length - 1)) * W;
-  const points = history.map((point, index) => {
-    const ratio = (point.rating - floor) / (ceiling - floor);
-    const clamped = Math.max(0, Math.min(1, ratio));
-    return { x: xOf(index), y: H - PAD_BOTTOM - clamped * plotH, rating: Math.round(point.rating) };
-  });
+  const cssVar = (n: string, fallback: string): string =>
+    getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fallback;
+
+  const buildChart = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    chartRef.current?.destroy();
+
+    const green = cssVar("--green", "#3fb98c");
+
+    const chart = new Chart(canvas, {
+      type: "line",
+      data: {
+        labels: history.map((_, i) => i),
+        datasets: [{
+          data: history.map((p) => p.rating),
+          borderColor: green,
+          backgroundColor: (ctx) => {
+            const { chart } = ctx;
+            const { ctx: c, chartArea } = chart;
+            if (!chartArea) return "transparent";
+            const g = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+            g.addColorStop(0, green);
+            g.addColorStop(1, "transparent");
+            return g;
+          },
+          fill: true,
+          tension: 0,
+          pointBackgroundColor: green,
+          pointBorderColor: "transparent",
+          pointRadius: 2.5,
+          pointHoverRadius: 6,
+          pointHoverBackgroundColor: green,
+          pointHoverBorderColor: cssVar("--panel", "#0d1117"),
+          pointHoverBorderWidth: 2,
+          borderWidth: 2.5,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 900, easing: "easeOutQuart" },
+        interaction: { intersect: false, mode: "index" as const },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: cssVar("--panel", "#0d1117"),
+            titleColor: cssVar("--muted", "#667085"),
+            bodyColor: cssVar("--text", "#f0f6fc"),
+            borderColor: cssVar("--line-soft", "#21262d"),
+            borderWidth: 1,
+            cornerRadius: 8,
+            padding: 10,
+            displayColors: false,
+            titleFont: { family: "ui-monospace, monospace", size: 11, weight: "bold" },
+            bodyFont: { family: "ui-monospace, monospace", size: 14, weight: "bold" },
+            callbacks: {
+              title: (items) => {
+                const i = items[0]?.dataIndex;
+                if (i == null) return "";
+                return new Date(history[i].at).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+              },
+              label: (item) => `Rating ${Math.round(item.parsed.y ?? 0)}`,
+            },
+          },
+        },
+        scales: {
+          x: { display: false },
+          y: { display: false, min: floor, max: ceiling },
+        },
+      },
+    });
+    chartRef.current = chart;
+  };
+
+  useEffect(() => {
+    buildChart();
+    const handler = () => buildChart();
+    document.addEventListener("luogu-duel:theme", handler);
+    return () => {
+      document.removeEventListener("luogu-duel:theme", handler);
+      chartRef.current?.destroy();
+      chartRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name]);
 
   return (
     <section class="rating-curve-card" aria-label="Rating 曲线">
       <div><span>RATING</span><strong>{Math.round(current)}</strong><em class={current >= first ? "up" : "down"}>{current >= first ? "+" : ""}{Math.round(current - first)}</em></div>
-      <svg viewBox={`0 0 ${W} ${H}`} class="rating-svg" aria-hidden="true">
-        {points.length > 1 ? (
-          <>
-            <path
-              d={`M ${points[0].x} ${H} ${points.map((p) => `L ${p.x} ${p.y}`).join(" ")} L ${points.at(-1)!.x} ${H} Z`}
-              fill="var(--green)"
-              opacity="0.07"
-            />
-            <polyline
-              class="rating-line"
-              points={points.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-              stroke="var(--green)"
-              stroke-width="2.5"
-              stroke-linejoin="round"
-              stroke-linecap="round"
-              vector-effect="non-scaling-stroke"
-            />
-          </>
-        ) : null}
-        {points.map((p, i) => (
-          <g class={`rating-dot${i === points.length - 1 ? " rating-dot-latest" : ""}`} key={i}>
-            <circle cx={p.x} cy={p.y} r="6.5" fill="transparent" />
-            <circle class="dot-fill" cx={p.x} cy={p.y} r="2.5" fill="var(--green)" />
-            <title>Rating {p.rating} — {new Date(history[i].at).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</title>
-          </g>
-        ))}
-      </svg>
+      <canvas ref={canvasRef} />
     </section>
   );
 };

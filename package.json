@@ -16,6 +16,7 @@
   "type": "module",
   "dependencies": {
     "@types/pako": "^2.0.4",
+    "chart.js": "^4.5.1",
     "lucide-preact": "^1.23.0",
     "pako": "^3.0.1",
     "preact": "^10.29.6",
