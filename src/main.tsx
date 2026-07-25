@@ -95,6 +95,21 @@ let roomSecret = "public-lobby";
 let envelopes: SignedEnvelope[] = [];
 let state: DuelState = createInitialState(roomId);
 let globalModeration: DuelState = createInitialState("global");
+// 本地乐观提交的封禁/禁言事件缓冲。后台快照刷新（refreshGlobalModeration /
+// applyAuthoritativeSnapshot）会用服务端快照整体覆盖 globalModeration，若该快照在
+// 刚发布的封禁事件被服务端接纳前抢先到达，乐观更新会被抹掉，表现为“禁不上”。
+// 这里保留待确认事件，刷新时合并回去，直到服务端快照中已包含该事件再清理。
+let pendingGlobalEvents: DuelEvent[] = [];
+const mergePendingGlobalEvents = (events: DuelEvent[]): DuelEvent[] => {
+  const byId = new Map<string, DuelEvent>();
+  for (const event of events) byId.set(event.id, event);
+  for (const event of pendingGlobalEvents) if (event.roomId === "global") byId.set(event.id, event);
+  return [...byId.values()];
+};
+const prunePendingGlobalEvents = (confirmed: DuelEvent[]): void => {
+  const ids = new Set(confirmed.map((event) => event.id));
+  pendingGlobalEvents = pendingGlobalEvents.filter((event) => !ids.has(event.id));
+};
 let rooms: RoomListing[] = [];
 let users: UserRecord[] = [];
 let usersLoaded = false;
@@ -929,7 +944,12 @@ const applyAuthoritativeSnapshot = async (incoming: SignedEnvelope[]) => {
   }
   const unique = new Map(verified.map((envelope) => [envelope.event.id, envelope]));
   envelopes = [...unique.values()].sort(compareEnvelopes);
-  state = applyEvents(roomId, envelopes.map((item) => item.event));
+  let events = envelopes.map((item) => item.event);
+  if (roomId === "global") {
+    events = mergePendingGlobalEvents(events);
+    prunePendingGlobalEvents(events);
+  }
+  state = applyEvents(roomId, events);
   writeEventCache(roomId, envelopes);
   if (roomId === "global") globalModeration = state;
   saveHistory();
@@ -1154,7 +1174,9 @@ const refreshGlobalModeration = async () => {
       await mergeHomeGlobalSnapshot(remote);
       return;
     }
-    globalModeration = applyEvents("global", remote.map((item) => item.event));
+    const refreshed = mergePendingGlobalEvents(remote.map((item) => item.event));
+    prunePendingGlobalEvents(refreshed);
+    globalModeration = applyEvents("global", refreshed);
   } catch {
     if (mode === "home" && roomId === "global") globalModeration = state;
   }
@@ -1207,6 +1229,7 @@ const moderateGlobal = async (action: "ban" | "unban" | "mute" | "unmute") => {
           ? { ...base, type: "player.muted", targetId, targetName }
           : { ...base, type: "player.unmuted", targetId, targetName };
   const envelope = await signEvent(identity, event);
+  pendingGlobalEvents.push(event);
   await publishEnvelope("global", "public-lobby", envelope);
   globalModeration = applyEvent(globalModeration, envelope.event);
   if (mode === "home" || mode === "admin") state = globalModeration;
@@ -2108,7 +2131,8 @@ const roomStatusLabel = (room: RoomListing): string =>
 
 const roomDifficultyLabel = (room: RoomListing): string => {
   if (!room.averageDifficulty && !room.minimumDifficulty && !room.maximumDifficulty) return "";
-  const labelOf = (value?: number): string => value ? difficultyMeta.find((d) => d.value === value)?.label ?? `L${value}` : "";
+  // 主页 Duel 菜单使用彩虹色名（红橙黄绿青蓝紫）而非文字难度名
+  const labelOf = (value?: number): string => value ? difficultyMeta.find((d) => d.value === value)?.colorName ?? `L${value}` : "";
   const min = room.minimumDifficulty ? labelOf(room.minimumDifficulty) : "";
   const max = room.maximumDifficulty ? labelOf(room.maximumDifficulty) : (room.averageDifficulty ? labelOf(Math.round(room.averageDifficulty)) : "");
   if (min && max) return min === max ? min : `${min}~${max}`;
@@ -2730,12 +2754,25 @@ const RatingCurve = ({ name }: { name: string }) => {
   const ratings = history.map((point) => point.rating);
   const minimum = Math.min(...ratings);
   const maximum = Math.max(...ratings);
-  // 默认显示范围 1200~1900；仅当数据超出该范围时才向外扩展
-  const RATING_DEFAULT_MIN = 1200;
-  const RATING_DEFAULT_MAX = 1700;
+  // 完全基于数据自适应：以数据为中心，保证最小可视范围，并向外留白
   const RATING_PAD = 40;
-  const floor = Math.min(RATING_DEFAULT_MIN, minimum - RATING_PAD);
-  const ceiling = Math.max(RATING_DEFAULT_MAX, maximum + RATING_PAD);
+  const MIN_CHART_RANGE = 300;
+
+  const dataRange = maximum - minimum;
+  const dataCenter = (minimum + maximum) / 2;
+
+  let floor: number;
+  let ceiling: number;
+
+  if (dataRange < MIN_CHART_RANGE) {
+    const half = Math.max(RATING_PAD, (MIN_CHART_RANGE - dataRange) / 2);
+    floor = Math.floor(dataCenter - half);
+    ceiling = Math.ceil(dataCenter + half);
+  } else {
+    const padding = Math.max(RATING_PAD, dataRange * 0.15);
+    floor = Math.floor(minimum - padding);
+    ceiling = Math.ceil(maximum + padding);
+  }
   const first = history[0].rating;
   const current = history.at(-1)?.rating ?? first;
 

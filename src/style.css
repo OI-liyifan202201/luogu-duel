@@ -523,7 +523,7 @@ body .duel-swal-deny {
   display: grid;
   padding: 14px;
   overflow: hidden;
-  background: var(--bg);
+  background: transparent;
 }
 
 .boot-screen.leaving {
@@ -596,12 +596,16 @@ body .duel-swal-deny {
 .ranking-skeleton > div,
 .admin-players-skeleton > div,
 .admin-rooms-skeleton > div { display: grid; align-items: center; gap: 10px; min-height: 48px; border-top: 1px solid var(--line-soft); background: color-mix(in srgb, var(--panel-alt) 28%, transparent); border-radius: 8px; padding: 6px 10px; }
-.room-list-skeleton > div { grid-template-columns: 74px 1fr 64px; }
+.room-list-skeleton > div { grid-template-columns: 74px minmax(0, 1fr) 112px 76px; align-items: center; }
 .room-list-skeleton > div > span { display: flex; align-items: center; gap: 8px; }
-.room-list-skeleton code { width: 48px; height: 13px; }
-.room-list-skeleton i { width: 27px; height: 27px; border-radius: 50%; }
-.room-list-skeleton b { width: min(210px, 65%); height: 14px; }
-.room-list-skeleton em { width: 56px; height: 20px; }
+.room-list-skeleton code { width: 52px; height: 14px; }
+.room-list-skeleton .sk-line { flex-direction: column; align-items: flex-start; gap: 5px; }
+.room-list-skeleton .sk-line b { width: min(160px, 58%); height: 13px; }
+.room-list-skeleton .sk-line i { width: 42%; height: 11px; }
+.room-list-skeleton .sk-diff { gap: 4px; }
+.room-list-skeleton .sk-diff b { width: 24px; height: 14px; }
+.room-list-skeleton .sk-diff em { width: 24px; height: 14px; font-style: normal; }
+.room-list-skeleton > div > em { width: 48px; height: 20px; border-radius: 4px; }
 .ranking-skeleton > div { grid-template-columns: 28px 30px 1fr 64px 48px; }
 .ranking-skeleton i { width: 20px; height: 12px; }
 .ranking-skeleton span { width: 30px; height: 30px; border-radius: 50%; }
@@ -1689,12 +1693,14 @@ button.is-loading { cursor: wait; }
 .vote,
 .player-row {
   border: 1px solid var(--line-soft);
-  border-radius:  4px;
-  background: var(--panel);
+  border-radius: var(--panel-radius);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: var(--shadow);
   transition:
     border-color 140ms ease,
     transform 140ms ease,
-    background 140ms ease;
+    background 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .room-card:hover,
@@ -1703,8 +1709,9 @@ button.is-loading { cursor: wait; }
 .problem-card:hover,
 .vote:hover,
 .player-row:hover {
-  border-color: color-mix(in srgb, var(--green) 36%, transparent);
-  background: transparent;
+  border-color: color-mix(in srgb, var(--green) 40%, transparent);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  box-shadow: 0 10px 26px rgb(0 0 0 / .22);
   transform: translateY(-1px);
 }
 

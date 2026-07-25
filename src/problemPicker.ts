@@ -21,15 +21,15 @@ const labels: Record<ProblemPlatform, string> = {
   atcoder: "AtCoder"
 };
 
-export const difficultyMeta: Array<{ value: DifficultyLevel; label: string; short: string; color: string }> = [
-  { value: 1, label: "入门", short: "入门", color: "#FE4C61" },
-  { value: 2, label: "普及-", short: "普及-", color: "#F39C11" },
-  { value: 3, label: "普及", short: "普及", color: "#FFC116" },
-  { value: 4, label: "普及+/提高-", short: "普及+/提高-", color: "#52C41A" },
-  { value: 5, label: "提高", short: "提高", color: "#13C2C2" },
-  { value: 6, label: "提高+/省选-", short: "提高+/省选-", color: "#3498DB" },
-  { value: 7, label: "省选/NOI-", short: "省选/NOI-", color: "#9D3DCF" },
-  { value: 8, label: "NOI/NOI+/CTS", short: "NOI/NOI+/CTS", color: "#0E1D69" }
+export const difficultyMeta: Array<{ value: DifficultyLevel; label: string; short: string; color: string; colorName: string }> = [
+  { value: 1, label: "入门", short: "入门", color: "#FE4C61", colorName: "红" },
+  { value: 2, label: "普及-", short: "普及-", color: "#F39C11", colorName: "橙" },
+  { value: 3, label: "普及", short: "普及", color: "#FFC116", colorName: "黄" },
+  { value: 4, label: "普及+/提高-", short: "普及+/提高-", color: "#52C41A", colorName: "绿" },
+  { value: 5, label: "提高", short: "提高", color: "#13C2C2", colorName: "青" },
+  { value: 6, label: "提高+/省选-", short: "提高+/省选-", color: "#3498DB", colorName: "蓝" },
+  { value: 7, label: "省选/NOI-", short: "省选/NOI-", color: "#9D3DCF", colorName: "紫" },
+  { value: 8, label: "NOI/NOI+/CTS", short: "NOI/NOI+/CTS", color: "#0E1D69", colorName: "黑" }
 ];
 
 export const defaultRatios: PlatformRatios = { luogu: 2, codeforces: 1, atcoder: 1 };

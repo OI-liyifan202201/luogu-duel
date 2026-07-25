@@ -15,7 +15,18 @@ export const SkeletonRows = ({ count = 5, compact = false }: SkeletonRowsProps) 
   </div>
 );
 
-export const RoomListSkeleton = () => <div class="room-list-skeleton" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <div key={index}><code /><span><i /><b /></span><em /></div>)}</div>;
+export const RoomListSkeleton = () => (
+  <div class="room-list-skeleton" aria-hidden="true">
+    {Array.from({ length: 6 }, (_, index) => (
+      <div key={index}>
+        <code />
+        <span class="sk-line"><b /><i /></span>
+        <span class="sk-diff"><b /><em /></span>
+        <em />
+      </div>
+    ))}
+  </div>
+);
 
 export const RankingSkeleton = () => <div class="ranking-skeleton" aria-hidden="true">{Array.from({ length: 7 }, (_, index) => <div key={index}><i /><span /><b /><code /><em /></div>)}</div>;
 
