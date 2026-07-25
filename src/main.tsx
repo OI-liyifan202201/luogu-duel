@@ -200,7 +200,14 @@ const draft = {
   adminReason: "",
   adminRatings: {} as Record<string, string>,
   spectatorsOpen: false,
-  matchIslandPinned: false
+  matchIslandPinned: false,
+  userMenuClosing: false
+};
+
+const closeUserMenu = () => {
+  if (!draft.userMenuOpen || draft.userMenuClosing) return;
+  draft.userMenuClosing = true;
+  notify();
 };
 
 type ToastMessage = {
@@ -242,6 +249,13 @@ function syncViewportScroll(): void {
 }
 
 window.addEventListener("resize", syncViewportScroll, { passive: true });
+
+document.addEventListener("pointerdown", (event) => {
+  if (!draft.userMenuOpen || draft.userMenuClosing) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest(".session-menu, .session-user")) return;
+  closeUserMenu();
+}, true);
 
 let themeTick = 0;
 
@@ -1770,13 +1784,23 @@ const Shell = ({ title, subtitle, children }: { title: string; subtitle: string;
         {bootPhase === "ready" ? (
           <>
             {isAdmin() ? <button class="ghost" onClick={() => { draft.adminSearch = mode === "profile" ? (profileUserName || "") : ""; location.hash = mode === "admin" ? "" : "admin=1"; }}><Shield size={15} />{mode === "admin" ? "主页" : "管理"}</button> : null}
-            <button class="session-user" onClick={() => { draft.userMenuOpen = !draft.userMenuOpen; notify(); }}>
+            <button class="session-user" onClick={() => {
+              if (draft.userMenuClosing) { draft.userMenuClosing = false; draft.userMenuOpen = true; notify(); return; }
+              if (draft.userMenuOpen) closeUserMenu();
+              else { draft.userMenuOpen = true; draft.userMenuClosing = false; notify(); }
+            }}>
               <UserAvatar name={identity?.luoguName ?? "?"} className="chat-avatar" />
               {identity?.luoguName ?? "..."}
             </button>
-            {draft.userMenuOpen ? <div class="session-menu">
-              <button onClick={() => { draft.userMenuOpen = false; openProfile(identity?.luoguName ?? ""); }}>个人主页</button>
-              <button onClick={() => { draft.userMenuOpen = false; logout(); }}><LogOut size={14} />登出</button>
+            {draft.userMenuOpen ? <div class={`session-menu${draft.userMenuClosing ? " closing" : ""}`} onAnimationEnd={(event) => {
+              if (draft.userMenuClosing && event.animationName === "menu-pop-out") {
+                draft.userMenuOpen = false;
+                draft.userMenuClosing = false;
+                notify();
+              }
+            }}>
+              <button onClick={() => { closeUserMenu(); openProfile(identity?.luoguName ?? ""); }}>个人主页</button>
+              <button onClick={() => { closeUserMenu(); logout(); }}><LogOut size={14} />登出</button>
             </div> : null}
           </>
         ) : null}
@@ -2005,12 +2029,14 @@ const RoomList = () => {
       <div class="duel-row duel-head">
         <span>ID</span>
         <span>选手</span>
+        <span>难度</span>
         <span>状态</span>
       </div>
       {fresh.map((room) => (
-        <button class="duel-row" key={room.roomId} disabled={joiningRoom || creatingRoom} onClick={() => void joinRoom(room)} style={`--diff-gradient: ${roomDifficultyGradient(room)}`} title={roomDifficultyLabel(room) || undefined}>
+        <button class="duel-row" key={room.roomId} disabled={joiningRoom || creatingRoom} onClick={() => void joinRoom(room)} title={roomDifficultyLabel(room) || undefined}>
           <code>{shortRoomId(room.roomId)}</code>
           <RoomLineView room={room} />
+          <RoomDifficulty room={room} />
           <em class={roomStatusClass(room)}>{roomStatusLabel(room)}</em>
         </button>
       ))}
@@ -2084,12 +2110,15 @@ const roomDifficultyLabel = (room: RoomListing): string => {
   return min || max;
 };
 
-const roomDifficultyGradient = (room: RoomListing): string => {
+const RoomDifficulty = ({ room }: { room: RoomListing }) => {
   const min = room.minimumDifficulty ?? 1;
   const max = room.maximumDifficulty ? room.maximumDifficulty : (room.averageDifficulty ? Math.round(room.averageDifficulty) : min);
   const minColor = difficultyMeta.find((d) => d.value === min)?.color ?? "#888";
   const maxColor = difficultyMeta.find((d) => d.value === max)?.color ?? "#888";
-  return `linear-gradient(to right, ${minColor} 0%, ${minColor} 80px, transparent 180px, transparent calc(100% - 180px), ${maxColor} calc(100% - 80px), ${maxColor} 100%)`;
+  const label = roomDifficultyLabel(room);
+  if (!label) return <span class="room-difficulty">—</span>;
+  const [low, high] = label.split("~");
+  return <span class="room-difficulty"><b style={{ color: minColor }}>{low}</b>{high ? <><i>~</i><b style={{ color: maxColor }}>{high}</b></> : null}</span>;
 };
 
 const roomStatusClass = (room: RoomListing): string =>
@@ -2663,29 +2692,21 @@ const RatingCurve = ({ name }: { name: string }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const user = userRecordFor(name);
   const raw = user?.ratingHistory?.length ? user.ratingHistory.slice(-24) : [{ at: Date.now(), rating: user?.rating ?? 1300 }];
-  const history = raw.length === 1 ? [raw[0], { ...raw[0], at: raw[0].at + 1 }] : raw;
+  const values = raw.map((point) => point.rating).sort((a, b) => a - b);
+  const medianOf = (items: number[]): number => items.length % 2
+    ? items[(items.length - 1) / 2]
+    : (items[items.length / 2 - 1] + items[items.length / 2]) / 2;
+  const median = medianOf(values);
+  const deviation = medianOf(values.map((rating) => Math.abs(rating - median)).sort((a, b) => a - b));
+  const outlierDistance = Math.max(400, deviation * 6);
+  const filtered = raw.filter((point) => Math.abs(point.rating - median) <= outlierDistance);
+  const visible = filtered.length ? filtered : raw;
+  const history = visible.length === 1 ? [visible[0], { ...visible[0], at: visible[0].at + 1 }] : visible;
   const ratings = history.map((point) => point.rating);
   const minimum = Math.min(...ratings);
   const maximum = Math.max(...ratings);
-  // Robust upper bound: ignore extreme spikes (e.g. 1300 -> 10000 -> 1300) so a single
-  // outlier doesn't squash the rest of the curve. Outliers are drawn as two near-vertical
-  // lines rising from the curve and stopping ~10px below the top edge — an uncapped spike
-  // (the top is left open), not a point pinned to the chart ceiling.
-  const sorted = [...ratings].sort((a, b) => a - b);
-  const quantile = (p: number): number => {
-    const idx = (sorted.length - 1) * p;
-    const lo = Math.floor(idx);
-    const hi = Math.ceil(idx);
-    return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
-  };
-  const q1 = quantile(0.25);
-  const q3 = quantile(0.75);
-  const iqr = q3 - q1;
-  const upperFence = q3 + 3 * iqr;
-  const normalRatings = ratings.filter((rating) => rating <= upperFence);
-  const robustMax = normalRatings.length ? Math.max(...normalRatings) : maximum;
-  const range = Math.max(80, robustMax - minimum);
-  const floor = minimum - Math.max(30, (range - (robustMax - minimum)) / 2);
+  const range = Math.max(80, maximum - minimum);
+  const floor = minimum - Math.max(30, (range - (maximum - minimum)) / 2);
   const ceiling = floor + range;
   const first = history[0].rating;
   const current = history.at(-1)?.rating ?? first;
@@ -2695,9 +2716,8 @@ const RatingCurve = ({ name }: { name: string }) => {
     const dpr = window.devicePixelRatio || 1;
     const W = 360;
     const H = 108;
-    const PAD_TOP = 10;       // 离群尖峰顶端距画布顶部 10px = “上不封顶”
     const PAD_BOTTOM = 10;
-    const NORMAL_TOP = 28;    // 正常曲线预留顶部空间，使离群尖峰明显更高
+    const PAD_TOP = 12;
     canvas.width = W * dpr;
     canvas.height = H * dpr;
     const ctx = canvas.getContext("2d");
@@ -2706,27 +2726,33 @@ const RatingCurve = ({ name }: { name: string }) => {
     ctx.clearRect(0, 0, W, H);
     const green = getComputedStyle(document.documentElement).getPropertyValue("--green").trim() || "#3fb98c";
 
-    const isOut = ratings.map((rating) => rating > upperFence);
     const xOf = (i: number): number => (history.length <= 1 ? 0 : (i / (history.length - 1)) * W);
-    const yOfNormal = (rating: number): number => {
+    const yOf = (rating: number): number => {
       const ratio = (rating - floor) / (ceiling - floor);
       const clamped = Math.max(0, Math.min(1, ratio));
-      return H - PAD_BOTTOM - clamped * (H - PAD_BOTTOM - NORMAL_TOP);
+      return H - PAD_BOTTOM - clamped * (H - PAD_BOTTOM - PAD_TOP);
     };
-
-    // 主曲线只连正常点；离群点单独画成两条近似垂直线
-    const mainPts: Array<[number, number]> = [];
-    history.forEach((point, i) => {
-      if (isOut[i]) return;
-      mainPts.push([xOf(i), yOfNormal(point.rating)]);
-    });
-
-    // 填充（正常曲线下方）
-    if (mainPts.length) {
+    const points = history.map((point, index) => ({ x: xOf(index), y: yOf(point.rating) }));
+    const traceSmoothCurve = (moveToStart = true) => {
+      if (moveToStart) ctx.moveTo(points[0].x, points[0].y);
+      for (let index = 0; index < points.length - 1; index += 1) {
+        const p0 = points[Math.max(0, index - 1)];
+        const p1 = points[index];
+        const p2 = points[index + 1];
+        const p3 = points[Math.min(points.length - 1, index + 2)];
+        ctx.bezierCurveTo(
+          p1.x + (p2.x - p0.x) / 6, p1.y + (p2.y - p0.y) / 6,
+          p2.x - (p3.x - p1.x) / 6, p2.y - (p3.y - p1.y) / 6,
+          p2.x, p2.y
+        );
+      }
+    };
+    if (points.length) {
       ctx.beginPath();
-      ctx.moveTo(mainPts[0][0], H);
-      mainPts.forEach(([x, y]) => ctx.lineTo(x, y));
-      ctx.lineTo(mainPts[mainPts.length - 1][0], H);
+      ctx.moveTo(points[0].x, H);
+      ctx.lineTo(points[0].x, points[0].y);
+      traceSmoothCurve(false);
+      ctx.lineTo(points.at(-1)!.x, H);
       ctx.closePath();
       ctx.globalAlpha = 0.16;
       ctx.fillStyle = green;
@@ -2734,10 +2760,9 @@ const RatingCurve = ({ name }: { name: string }) => {
       ctx.globalAlpha = 1;
     }
 
-    // 主曲线描边
-    if (mainPts.length > 1) {
+    if (points.length > 1) {
       ctx.beginPath();
-      mainPts.forEach(([x, y], idx) => (idx ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      traceSmoothCurve();
       ctx.strokeStyle = green;
       ctx.lineWidth = 3;
       ctx.lineJoin = "round";
@@ -2745,39 +2770,6 @@ const RatingCurve = ({ name }: { name: string }) => {
       ctx.stroke();
     }
 
-    // 离群尖峰：两条近似垂直线，顶端停在离画布顶部 PAD_TOP=10px 处，顶部不封口 = 上不封顶
-    const nearestNormal = (from: number, dir: -1 | 1): number => {
-      let i = from + dir;
-      while (i >= 0 && i < history.length) {
-        if (!isOut[i]) return i;
-        i += dir;
-      }
-      return -1;
-    };
-    isOut.forEach((out, i) => {
-      if (!out) return;
-      const prev = nearestNormal(i, -1);
-      const next = nearestNormal(i, 1);
-      ctx.strokeStyle = green;
-      ctx.lineWidth = 3;
-      ctx.lineCap = "round";
-      if (prev >= 0) {
-        const px = xOf(prev);
-        const py = yOfNormal(history[prev].rating);
-        ctx.beginPath();
-        ctx.moveTo(px, py);
-        ctx.lineTo(px, PAD_TOP); // 左壁：从曲线近似垂直升至顶端 10px 处
-        ctx.stroke();
-      }
-      if (next >= 0) {
-        const nx = xOf(next);
-        const ny = yOfNormal(history[next].rating);
-        ctx.beginPath();
-        ctx.moveTo(nx, PAD_TOP); // 右壁：从顶端 10px 处近似垂直落回曲线
-        ctx.lineTo(nx, ny);
-        ctx.stroke();
-      }
-    });
   };
   useEffect(() => {
     draw();

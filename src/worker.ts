@@ -236,38 +236,10 @@ export class DuelRoom extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
-    const actorId = this.wsActors.get(ws);
-    if (!actorId) return;
+    if (!this.wsActors.has(ws)) return;
     this.wsActors.delete(ws);
-    // Check if the player still has other active WebSocket connections
-    let hasOtherConnection = false;
-    for (const [otherWs, otherActorId] of this.wsActors) {
-      if (otherWs !== ws && otherActorId === actorId && otherWs.readyState === WebSocket.OPEN) {
-        hasOtherConnection = true;
-        break;
-      }
-    }
-    if (hasOtherConnection) return;
-    // Generate player.left event automatically on disconnect
-    try {
-      this.hydrateEvents();
-      const player = this.cachedState.players[actorId];
-      if (!player || this.cachedState.phase === "finished") return;
-      // Only auto-leave for non-global rooms
-      if (this.cachedState.roomId === "global") return;
-      const now = Date.now();
-      // Unready the player first
-      if (player.ready) {
-        const unreadyEnvelope = await systemPlayerReadyEnvelope(this.cachedState.roomId, this.cachedState.lamport + 1, now, actorId, false);
-        await this.acceptEnvelope(unreadyEnvelope);
-        this.broadcast({ type: "event", envelope: unreadyEnvelope });
-      }
-      const leaveEnvelope = await systemPlayerLeaveEnvelope(this.cachedState.roomId, this.cachedState.lamport + 2, now + 1, actorId);
-      await this.acceptEnvelope(leaveEnvelope);
-      this.broadcast({ type: "event", envelope: leaveEnvelope });
-    } catch {
-      // Best-effort cleanup; ignore errors
-    }
+    // Refreshes and transient network changes close sockets too. Preserve the seat;
+    // only an explicit player.left event is allowed to remove a room member.
   }
 
   private async handleWebSocket(request: Request): Promise<Response> {
@@ -1267,7 +1239,10 @@ const fetchVJudgeStatus = async (requestUrl: URL, request: Request, env: Env): P
       const pageRecords = payload.data ?? [];
       if (!pageRecords.length) break;
       records.push(...pageRecords);
-      const pageTimes = pageRecords.map((record) => Number(record.time)).filter(Number.isFinite);
+      const pageTimes = pageRecords
+        .map((record) => Number(record.time))
+        .filter(Number.isFinite)
+        .map((time) => time > 0 && time < 10_000_000_000 ? time * 1000 : time);
       if (since && pageTimes.some((time) => time < since)) break;
       start += pageRecords.length;
       const total = Number(payload.recordsFiltered ?? payload.recordsTotal);
@@ -1278,7 +1253,8 @@ const fetchVJudgeStatus = async (requestUrl: URL, request: Request, env: Env): P
       const userId = typeof record.userId === "number" || typeof record.userId === "string" ? record.userId : undefined;
       const userName = typeof record.userName === "string" ? record.userName : "";
       const status = typeof record.status === "string" ? record.status : "";
-      const time = typeof record.time === "number" ? record.time : Number(record.time);
+      const rawTime = typeof record.time === "number" ? record.time : Number(record.time);
+      const time = rawTime > 0 && rawTime < 10_000_000_000 ? rawTime * 1000 : rawTime;
       const runId = typeof record.runId === "number" || typeof record.runId === "string" ? record.runId : "";
       const key = `${runId || userId}:${time}`;
       if (userId === undefined || !status || !Number.isFinite(time) || time < since || seen.has(key)) return [];
