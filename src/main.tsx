@@ -2730,9 +2730,12 @@ const RatingCurve = ({ name }: { name: string }) => {
   const ratings = history.map((point) => point.rating);
   const minimum = Math.min(...ratings);
   const maximum = Math.max(...ratings);
-  const range = Math.max(80, maximum - minimum);
-  const floor = minimum - Math.max(30, (range - (maximum - minimum)) / 2);
-  const ceiling = floor + range;
+  // 默认显示范围 1200~1900；仅当数据超出该范围时才向外扩展
+  const RATING_DEFAULT_MIN = 1200;
+  const RATING_DEFAULT_MAX = 1900;
+  const RATING_PAD = 40;
+  const floor = Math.min(RATING_DEFAULT_MIN, minimum - RATING_PAD);
+  const ceiling = Math.max(RATING_DEFAULT_MAX, maximum + RATING_PAD);
   const first = history[0].rating;
   const current = history.at(-1)?.rating ?? first;
 
@@ -2759,7 +2762,8 @@ const RatingCurve = ({ name }: { name: string }) => {
             if (!chartArea) return "transparent";
             const g = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
             g.addColorStop(0, green);
-            g.addColorStop(1, "transparent");
+            // 向主题背景色过渡：浅色模式→浅色，深色模式→深色（不再向黑色过渡）
+            g.addColorStop(1, cssVar("--panel", "#0d1117"));
             return g;
           },
           fill: true,

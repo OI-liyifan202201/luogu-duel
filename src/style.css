@@ -504,8 +504,16 @@ code {
   color: var(--text);
 }
 
-.duel-swal-deny {
-  color: var(--muted) !important;
+body .duel-swal-deny {
+  border: 1px solid var(--line) !important;
+  border-radius: 4px !important;
+  background: var(--panel-alt) !important;
+  color: #fff !important;
+}
+:root[data-theme="light"] body .duel-swal-deny {
+  background: #334155 !important;
+  border-color: #334155 !important;
+  color: #fff !important;
 }
 
 .boot-screen {
@@ -689,6 +697,11 @@ code {
   gap: 18px;
   min-height: 0;
   flex: 1;
+  border: 1px solid var(--line);
+  border-radius: var(--panel-radius);
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: var(--shadow);
+  padding: 22px;
 }
 .profile-skeleton-hero {
   display: grid;
@@ -697,6 +710,10 @@ code {
   align-items: center;
   min-height: 144px;
   flex-shrink: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-alt) 46%, transparent);
+  padding: 18px;
 }
 .profile-skeleton-hero i,
 .profile-skeleton-hero b,
@@ -718,8 +735,10 @@ code {
   justify-content: flex-end;
   gap: 6px;
   margin: -4px 0 0;
-  border-bottom: 1px solid var(--line-soft);
-  padding-bottom: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-alt) 46%, transparent);
+  padding: 10px 12px;
 }
 .profile-skeleton-tabs i {
   width: 92px;
@@ -742,7 +761,7 @@ code {
 .profile-skeleton-main {
   border: 1px solid var(--line-soft);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--panel-alt) 56%, transparent);
+  background: color-mix(in srgb, var(--panel-alt) 64%, transparent);
   padding: 14px;
 }
 .profile-skeleton-side { overflow: hidden; }
@@ -750,7 +769,7 @@ code {
   position: relative;
   border: 1px solid var(--line-soft);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--panel-alt) 56%, transparent);
+  background: color-mix(in srgb, var(--panel-alt) 64%, transparent);
   padding: 14px 14px 22px;
   min-height: 92px;
 }
@@ -1316,7 +1335,7 @@ button.is-loading { cursor: wait; }
 .rating-curve-card {
   position: relative;
   overflow: hidden;
-  min-height: 138px;
+  min-height: 190px;
   margin: 0;
   border: 1px solid var(--line-soft);
   border-radius: var(--panel-radius);
