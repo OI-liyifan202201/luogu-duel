@@ -2754,25 +2754,25 @@ const RatingCurve = ({ name }: { name: string }) => {
   const ratings = history.map((point) => point.rating);
   const minimum = Math.min(...ratings);
   const maximum = Math.max(...ratings);
-  // 完全基于数据自适应：以数据为中心，保证最小可视范围，并向外留白
+  // 完全基于数据自适应：先按数据上下各留白，保证所有点都在区间内；
+  // 若可视区高度不足 MIN_CHART_RANGE，再向两侧对称扩展（仍以数据为中心，不溢出）。
   const RATING_PAD = 40;
   const MIN_CHART_RANGE = 300;
 
   const dataRange = maximum - minimum;
-  const dataCenter = (minimum + maximum) / 2;
+  const padding = Math.max(RATING_PAD, dataRange * 0.15);
+  let floor = minimum - padding;
+  let ceiling = maximum + padding;
 
-  let floor: number;
-  let ceiling: number;
-
-  if (dataRange < MIN_CHART_RANGE) {
-    const half = Math.max(RATING_PAD, (MIN_CHART_RANGE - dataRange) / 2);
-    floor = Math.floor(dataCenter - half);
-    ceiling = Math.ceil(dataCenter + half);
-  } else {
-    const padding = Math.max(RATING_PAD, dataRange * 0.15);
-    floor = Math.floor(minimum - padding);
-    ceiling = Math.ceil(maximum + padding);
+  const span = ceiling - floor;
+  if (span < MIN_CHART_RANGE) {
+    const extra = (MIN_CHART_RANGE - span) / 2;
+    floor -= extra;
+    ceiling += extra;
   }
+
+  floor = Math.floor(floor);
+  ceiling = Math.ceil(ceiling);
   const first = history[0].rating;
   const current = history.at(-1)?.rating ?? first;
 
