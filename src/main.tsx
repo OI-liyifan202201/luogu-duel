@@ -1235,15 +1235,15 @@ type RoomDialogValues = {
 
 const openCreateRoomDialog = async () => {
   if (creatingRoom) return;
-  const difficultyOptions = difficultyMeta.map((item) => `<option value="${item.value}" style="color:${item.color}">${item.label}</option>`).join("");
+  const difficultyOptions = difficultyMeta.map((item) => `<option value="${item.value}" data-difficulty="${item.value}" style="--difficulty-color:${item.color}">${item.label}</option>`).join("");
   const result = await Swal.fire<RoomDialogValues>({
     title: "生成房间",
     html: `
       <div class="room-builder-dialog">
         <label><span>题目数量</span><input id="room-builder-count" type="number" min="1" max="21"></label>
         <div class="room-builder-difficulties">
-          <label><span>最低难度</span><select id="room-builder-low">${difficultyOptions}</select></label>
-          <label><span>最高难度</span><select id="room-builder-high">${difficultyOptions}</select></label>
+          <label><span>最低难度</span><select id="room-builder-low" class="difficulty-select">${difficultyOptions}</select></label>
+          <label><span>最高难度</span><select id="room-builder-high" class="difficulty-select">${difficultyOptions}</select></label>
         </div>
         <div class="room-builder-oj">
           <strong>题目来源 <small>默认 2 : 1 : 1</small></strong>
@@ -1286,7 +1286,9 @@ const openCreateRoomDialog = async () => {
         return { enabled, weight };
       });
       const paintDifficulty = (select: HTMLSelectElement) => {
-        select.style.color = difficultyMeta.find((item) => item.value === Number(select.value))?.color ?? "var(--text)";
+        const color = difficultyMeta.find((item) => item.value === Number(select.value))?.color ?? "var(--text)";
+        select.dataset.difficulty = select.value;
+        select.style.setProperty("--difficulty-color", color);
       };
       const syncCustom = () => {
         const usingCustom = Boolean(custom.value.trim());
@@ -1870,7 +1872,14 @@ const Home = () => (
 );
 
 const Room = () => {
-  if (!lastRoomLiveStateAt && !state.problems.length) return <main class="room-grid room-loading"><div class="room-loading-head"><i /><div><b /><span /></div><strong /></div><SkeletonRows count={8} /></main>;
+  if (!lastRoomLiveStateAt && !state.problems.length) return (
+    <main class="room-grid room-loading">
+      <div class="skeleton-match-island"><i /><span /><b /></div>
+      <div class="panel skeleton-panel"><div class="sk-panel-head"><i /><b /></div><SkeletonRows count={4} compact /></div>
+      <div class="panel skeleton-panel"><div class="sk-panel-head"><i /><b /></div><SkeletonRows count={5} compact /></div>
+      <div class="panel skeleton-panel"><div class="sk-panel-head"><i /><b /></div><SkeletonRows count={6} compact /></div>
+    </main>
+  );
   return <main class="room-grid">
     <MatchIsland />
 
@@ -2113,7 +2122,12 @@ const RoomDifficulty = ({ room }: { room: RoomListing }) => {
   const label = roomDifficultyLabel(room);
   if (!label) return <span class="room-difficulty">—</span>;
   const [low, high] = label.split("~");
-  return <span class="room-difficulty"><b style={{ color: minColor }}>{low}</b>{high ? <><i>~</i><b style={{ color: maxColor }}>{high}</b></> : null}</span>;
+  return (
+    <span class="room-difficulty">
+      <b data-difficulty={min} style={{ "--difficulty-color": minColor } as JSX.CSSProperties}>{low}</b>
+      {high ? <><i>~</i><b data-difficulty={max} style={{ "--difficulty-color": maxColor } as JSX.CSSProperties}>{high}</b></> : null}
+    </span>
+  );
 };
 
 const roomStatusClass = (room: RoomListing): string =>
@@ -2516,7 +2530,21 @@ const ToastStack = () => {
 };
 
 const ProfilePage = () => {
-  if (profileLoading) return <main class="profile-page"><div class="profile-skeleton"><div class="profile-skeleton-hero"><i /><div><b /><span /></div><strong /></div><SkeletonRows count={6} /></div></main>;
+  if (profileLoading) return (
+    <main class="profile-page">
+      <div class="profile-card profile-skeleton">
+        <div class="profile-skeleton-hero"><i /><div><b /><span /></div><strong /></div>
+        <div class="profile-skeleton-tabs"><i /><i /><i /></div>
+        <div class="profile-skeleton-body">
+          <div class="profile-skeleton-main"><SkeletonRows count={5} /></div>
+          <div class="profile-skeleton-side">
+            <div class="profile-skeleton-curve"><span /><strong /></div>
+            <SkeletonRows count={2} compact />
+          </div>
+        </div>
+      </div>
+    </main>
+  );
   const name = profileUserName || identity.luoguName;
   const user = userRecordFor(name);
   const row = ratingRowFor(name);
@@ -2719,7 +2747,11 @@ const RatingCurve = ({ name }: { name: string }) => {
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    const green = getComputedStyle(document.documentElement).getPropertyValue("--green").trim() || "#3fb98c";
+    const cssVar = (name: string, fallback: string): string =>
+      getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+    const green = cssVar("--green", "#3fb98c");
+    const gold = cssVar("--gold", "#d4af37");
+    const blue = cssVar("--blue", "#5b7cfa");
 
     const xOf = (i: number): number => (history.length <= 1 ? 0 : (i / (history.length - 1)) * W);
     const yOf = (rating: number): number => {
@@ -2765,6 +2797,54 @@ const RatingCurve = ({ name }: { name: string }) => {
       ctx.stroke();
     }
 
+    // 在 Rating 曲线上凸显关键点：峰值 / 谷值 / 当前，打圆圈并标注数值。
+    if (points.length) {
+      const peakIndex = ratings.indexOf(maximum);
+      const troughIndex = ratings.indexOf(minimum);
+      const lastIndex = points.length - 1;
+      type KeyDef = { index: number; color: string; label: string; value: number };
+      const keys: KeyDef[] = [];
+      const pushKey = (index: number, color: string, label: string) => {
+        if (index < 0 || index >= points.length || keys.some((k) => k.index === index)) return;
+        keys.push({ index, color, label, value: Math.round(ratings[index]) });
+      };
+      pushKey(peakIndex, gold, "峰值");
+      pushKey(troughIndex, blue, "谷值");
+      pushKey(lastIndex, green, "当前");
+      for (const key of keys) {
+        const p = points[key.index];
+        if (!p) continue;
+        ctx.save();
+        ctx.shadowColor = key.color;
+        ctx.shadowBlur = 9;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6.5, 0, Math.PI * 2);
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = key.color;
+        ctx.stroke();
+        ctx.restore();
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = key.color;
+        ctx.fill();
+        const text = `${key.label} ${key.value}`;
+        ctx.font = "800 10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const above = p.y > H / 2;
+        const ty = above ? p.y - 17 : p.y + 17;
+        const tx = Math.max(30, Math.min(W - 30, p.x));
+        const tw = ctx.measureText(text).width;
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = cssVar("--panel", "#0d1117");
+        if (typeof ctx.roundRect === "function") ctx.roundRect(tx - tw / 2 - 6, ty - 8, tw + 12, 16, 5);
+        else ctx.rect(tx - tw / 2 - 6, ty - 8, tw + 12, 16);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = key.color;
+        ctx.fillText(text, tx, ty);
+      }
+    }
   };
   useEffect(() => {
     draw();

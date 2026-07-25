@@ -564,9 +564,11 @@ code {
 
 .boot-skeleton-grid > div {
   min-height: 430px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-soft);
   border-radius: var(--panel-radius);
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px) saturate(140%);
   padding: 20px;
 }
 
@@ -680,23 +682,149 @@ code {
 .problem-source-links a { padding: 2px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font-size: 10px; line-height: 1.2; text-decoration: none; }
 .problem-source-links a:hover { color: var(--text); background: color-mix(in srgb, var(--green) 12%, transparent); }
 
-.profile-skeleton { width: min(1440px, 100%); margin: 0 auto; padding: 22px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--panel); }
-.profile-skeleton-hero { display: grid; grid-template-columns: 96px 1fr 130px; align-items: center; gap: 18px; min-height: 100px; margin-bottom: 24px; }
-.profile-skeleton-hero i, .profile-skeleton-hero b, .profile-skeleton-hero span, .profile-skeleton-hero strong { display: block; border-radius: 5px; background: color-mix(in srgb, var(--muted) 14%, var(--panel)); animation: skeleton-pulse 1.15s ease-in-out infinite alternate; }
-.profile-skeleton-hero i { width: 88px; height: 88px; border-radius: 50%; }
-.profile-skeleton-hero b { width: min(260px, 60%); height: 22px; margin-bottom: 12px; }
+/* ===== 个人主页骨架图（适配新的 profile-card UI） ===== */
+.profile-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  flex: 1;
+}
+.profile-skeleton-hero {
+  display: grid;
+  grid-template-columns: 144px minmax(0, 1fr) auto;
+  gap: 22px;
+  align-items: center;
+  min-height: 144px;
+  flex-shrink: 0;
+}
+.profile-skeleton-hero i,
+.profile-skeleton-hero b,
+.profile-skeleton-hero span,
+.profile-skeleton-hero strong {
+  display: block;
+  border-radius: 6px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 12%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 26%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 12%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+.profile-skeleton-hero i { width: 144px; height: 144px; border-radius: 50%; }
+.profile-skeleton-hero b { width: min(260px, 60%); height: 26px; margin-bottom: 12px; }
 .profile-skeleton-hero span { width: 180px; height: 14px; }
-.profile-skeleton-hero strong { width: 100%; height: 44px; }
-.room-loading { padding: 14px; }
-.room-loading-head { display: grid; grid-template-columns: 56px 1fr 180px; align-items: center; gap: 16px; min-height: 130px; padding: 22px; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--panel); }
-.room-loading-head > * { display: block; border-radius: 5px; background: color-mix(in srgb, var(--muted) 14%, var(--panel)); animation: skeleton-pulse 1.15s ease-in-out infinite alternate; }
-.room-loading-head i { width: 48px; height: 48px; border-radius: 50%; }
-.room-loading-head b { width: min(360px, 70%); height: 24px; margin-bottom: 12px; }
-.room-loading-head span { display: block; width: 220px; height: 14px; }
-.room-loading-head strong { height: 56px; }
+.profile-skeleton-hero strong { width: 120px; height: 40px; }
+
+.profile-skeleton-tabs {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin: -4px 0 0;
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 10px;
+}
+.profile-skeleton-tabs i {
+  width: 92px;
+  height: 28px;
+  border-radius: 4px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 12%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 26%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 12%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+
+.profile-skeleton-body {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(300px, 2fr);
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+}
+.profile-skeleton-main,
+.profile-skeleton-side { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.profile-skeleton-main {
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel-alt) 56%, transparent);
+  padding: 14px;
+}
+.profile-skeleton-side { overflow: hidden; }
+.profile-skeleton-curve {
+  position: relative;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--panel-alt) 56%, transparent);
+  padding: 14px 14px 22px;
+  min-height: 92px;
+}
+.profile-skeleton-curve > * {
+  display: block;
+  border-radius: 5px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 12%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 26%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 12%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+.profile-skeleton-curve span { width: 64px; height: 10px; }
+.profile-skeleton-curve strong { width: 96px; height: 26px; margin-top: 8px; }
+
+/* ===== 比赛入口骨架图（适配新的 room-grid / match-island UI） ===== */
+.room-grid.room-loading { padding: 14px; }
+.room-grid.room-loading .skeleton-match-island {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 35;
+  width: min(360px, calc(100% - 28px));
+  height: 36px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 14px 38px rgb(0 0 0 / .24);
+  backdrop-filter: blur(10px) saturate(140%);
+}
+.room-grid.room-loading .skeleton-match-island > * {
+  display: block;
+  border-radius: 5px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 12%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 26%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 12%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+.room-grid.room-loading .skeleton-match-island i { width: 22px; height: 22px; border-radius: 50%; }
+.room-grid.room-loading .skeleton-match-island span { width: 40%; height: 12px; }
+.room-grid.room-loading .skeleton-match-island b { width: 22%; height: 12px; margin-left: auto; }
+
+.skeleton-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+.skeleton-panel .sk-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+.skeleton-panel .sk-panel-head > * {
+  display: block;
+  border-radius: 5px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 12%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 26%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 12%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+.skeleton-panel .sk-panel-head i { width: 18px; height: 18px; }
+.skeleton-panel .sk-panel-head b { width: 38%; height: 14px; }
 @media (max-width: 900px) {
-  .profile-skeleton-hero, .room-loading-head { grid-template-columns: 64px 1fr; }
-  .profile-skeleton-hero strong, .room-loading-head > strong { display: none; }
+  .profile-skeleton-hero { grid-template-columns: 88px minmax(0, 1fr); gap: 14px; min-height: 88px; }
+  .profile-skeleton-hero i { width: 88px; height: 88px; }
+  .profile-skeleton-hero strong { display: none; }
+  .profile-skeleton-body { display: block; }
+  .profile-skeleton-tabs { justify-content: stretch; }
+  .profile-skeleton-tabs i { flex: 1; min-width: 0; }
+  .room-grid.room-loading .skeleton-match-island span { display: none; }
 }
 
 .session-user {
@@ -1134,7 +1262,8 @@ button.is-loading { cursor: wait; }
 .room-builder-dialog > label:nth-of-type(2), .room-builder-difficulties, .room-builder-oj, .room-builder-unrated, .room-builder-cache { grid-column: 1 / -1; }
 .room-builder-difficulties { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .room-builder-difficulties label { display: grid; gap: 5px; color: var(--muted); font-weight: 700; }
-.room-builder-difficulties option { background: var(--input-bg); font-weight: 800; }
+.room-builder-difficulties option { background: var(--input-bg); font-weight: 800; color: var(--difficulty-color); }
+:root[data-theme="dark"] .room-builder-difficulties option[data-difficulty="8"] { color: #f1e296; }
 .room-builder-oj { display: grid; gap: 6px; border: 1px solid var(--line-soft); border-radius: 5px; background: var(--panel-alt); padding: 10px; }
 .room-builder-oj > strong { display: flex; justify-content: space-between; }
 .room-builder-oj small, .room-builder-dialog label small, .room-builder-cache { color: var(--muted); font-weight: 500; }
@@ -1433,8 +1562,9 @@ button.is-loading { cursor: wait; }
 .duel-row > em:last-child { text-align: right; }
 
 .room-difficulty { display: inline-flex; justify-content: flex-start; align-items: center; gap: 2px; font: 900 14px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
-.room-difficulty b { overflow: hidden; text-overflow: ellipsis; font: inherit; }
+.room-difficulty b { overflow: hidden; text-overflow: ellipsis; font: inherit; color: var(--difficulty-color); }
 .room-difficulty i { color: var(--muted); font-style: normal; }
+:root[data-theme="dark"] .room-difficulty b[data-difficulty="8"] { color: #f1e296; }
 
 .duel-head span { padding-top: 2px; }
 
