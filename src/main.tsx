@@ -2732,7 +2732,7 @@ const RatingCurve = ({ name }: { name: string }) => {
   const maximum = Math.max(...ratings);
   // 默认显示范围 1200~1900；仅当数据超出该范围时才向外扩展
   const RATING_DEFAULT_MIN = 1200;
-  const RATING_DEFAULT_MAX = 1900;
+  const RATING_DEFAULT_MAX = 1700;
   const RATING_PAD = 40;
   const floor = Math.min(RATING_DEFAULT_MIN, minimum - RATING_PAD);
   const ceiling = Math.max(RATING_DEFAULT_MAX, maximum + RATING_PAD);
@@ -3509,8 +3509,8 @@ const nameColor = (name: string, rating = ratingRowFor(name).rating): string => 
   if (rating == 0) return "rgb(173,139,0)";
   if(rating < 1270) return "rgb(191,191,191)"
   if (rating < 1350) return "rgb(52, 152, 219)";
-  if (rating < 1570) return "rgb(82, 196, 26)";
-  if (rating < 1700) return "rgb(243, 156, 17)";
+  if (rating < 1550) return "rgb(82, 196, 26)";
+  if (rating < 1650) return "rgb(243, 156, 17)";
   return "rgb(254, 76, 97)";
 };
 const playerRooms = (name: string): RoomListing[] =>
