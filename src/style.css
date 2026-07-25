@@ -664,7 +664,9 @@ body .duel-swal-deny {
   .admin-rooms-skeleton > div { grid-template-columns: 1fr 84px; }
   .admin-rooms-skeleton code { display: none; }
   .profile-skeleton-hero, .room-loading-head { grid-template-columns: 64px 1fr; }
-  .profile-skeleton-hero strong, .room-loading-head > strong { display: none; }
+  .profile-skeleton-hero i { width: 64px; height: 64px; }
+  .profile-skeleton-rating, .room-loading-head > strong { grid-column: 1 / -1; grid-template-columns: auto auto; justify-content: space-between; align-items: center; min-width: 0; border-top: 1px solid var(--line-soft); border-left: 0; padding: 10px 0 0; }
+  .profile-skeleton-rating em { margin: 0; }
 }
 
 .session-menu {
@@ -714,14 +716,11 @@ body .duel-swal-deny {
   align-items: center;
   min-height: 144px;
   flex-shrink: 0;
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--panel-alt) 46%, transparent);
-  padding: 18px;
 }
 .profile-skeleton-hero i,
 .profile-skeleton-hero b,
 .profile-skeleton-hero span,
+.profile-skeleton-hero em,
 .profile-skeleton-hero strong {
   display: block;
   border-radius: 6px;
@@ -732,17 +731,24 @@ body .duel-swal-deny {
 .profile-skeleton-hero i { width: 144px; height: 144px; border-radius: 50%; }
 .profile-skeleton-hero b { width: min(260px, 60%); height: 26px; margin-bottom: 12px; }
 .profile-skeleton-hero span { width: 180px; height: 14px; }
-.profile-skeleton-hero strong { width: 120px; height: 40px; }
+.profile-skeleton-rating {
+  display: grid;
+  align-content: center;
+  justify-items: end;
+  min-width: 150px;
+  border-left: 1px solid var(--line-soft);
+  padding-left: 24px;
+}
+.profile-skeleton-rating em { width: 56px; height: 10px; margin-bottom: 8px; }
+.profile-skeleton-rating strong { width: 110px; height: 34px; }
 
 .profile-skeleton-tabs {
   display: flex;
   justify-content: flex-end;
-  gap: 6px;
-  margin: -4px 0 0;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--panel-alt) 46%, transparent);
-  padding: 10px 12px;
+  gap: 4px;
+  margin: 18px 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 10px;
 }
 .profile-skeleton-tabs i {
   width: 92px;
@@ -786,6 +792,29 @@ body .duel-swal-deny {
 }
 .profile-skeleton-curve span { width: 64px; height: 10px; }
 .profile-skeleton-curve strong { width: 96px; height: 26px; margin-top: 8px; }
+
+.profile-skeleton-stats {
+  display: grid;
+  align-content: center;
+  gap: 7px;
+  min-height: 138px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--panel-alt) 78%, transparent);
+  padding: 16px;
+}
+.profile-skeleton-stats em,
+.profile-skeleton-stats strong,
+.profile-skeleton-stats small {
+  display: block;
+  border-radius: 5px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 12%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 26%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 12%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+.profile-skeleton-stats em { width: 64px; height: 10px; }
+.profile-skeleton-stats strong { width: 84px; height: 30px; }
+.profile-skeleton-stats small { width: 96px; height: 12px; }
 
 /* ===== 比赛入口骨架图（适配新的 room-grid / match-island UI） ===== */
 .room-grid.room-loading { padding: 14px; }
@@ -843,7 +872,8 @@ body .duel-swal-deny {
 @media (max-width: 900px) {
   .profile-skeleton-hero { grid-template-columns: 88px minmax(0, 1fr); gap: 14px; min-height: 88px; }
   .profile-skeleton-hero i { width: 88px; height: 88px; }
-  .profile-skeleton-hero strong { display: none; }
+  .profile-skeleton-rating { grid-column: 1 / -1; grid-template-columns: auto auto; justify-content: space-between; align-items: center; min-width: 0; border-top: 1px solid var(--line-soft); border-left: 0; padding: 12px 0 0; }
+  .profile-skeleton-rating em { margin: 0; }
   .profile-skeleton-body { display: block; }
   .profile-skeleton-tabs { justify-content: stretch; }
   .profile-skeleton-tabs i { flex: 1; min-width: 0; }

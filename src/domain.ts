@@ -336,7 +336,7 @@ const joinPlayer = (state: DuelState, actorId: string, luoguName: string, reques
   if (banned) {
     state.kicked[actorId] = banned;
     pushSystem(state, `已阻止被封禁用户 ${name} 加入：${banned.reason}`, at);
-  } else if (state.roomId !== "global") {
+  } else if (state.roomId !== "global" && team !== "spectator") {
     pushSystem(state, `${name} 加入 ${teamName(team)}`, at);
   }
 };
@@ -344,11 +344,28 @@ const joinPlayer = (state: DuelState, actorId: string, luoguName: string, reques
 const leavePlayer = (state: DuelState, actorId: string, at: number) => {
   const player = state.players[actorId];
   if (!player || state.phase === "finished") return;
+  const leavingTeam = player.team;
   delete state.players[actorId];
   delete state.muted[actorId];
   delete state.kicked[actorId];
   if (state.hostId === actorId) state.hostId = Object.keys(state.players)[0];
-  if (state.roomId !== "global") pushSystem(state, `${player.luoguName} 退出房间`, at);
+  if (state.roomId !== "global" && leavingTeam !== "spectator") pushSystem(state, `${player.luoguName} 退出房间`, at);
+  // 对方整队无人 -> 我方直接胜利
+  if (state.phase === "arena") {
+    const reds = Object.values(state.players).filter((entry) => entry.team === "red").length;
+    const blues = Object.values(state.players).filter((entry) => entry.team === "blue").length;
+    if (reds > 0 && blues === 0) {
+      state.phase = "finished";
+      state.endedAt = at;
+      state.winner = "red";
+      if (state.roomId !== "global") pushSystem(state, "蓝方已无人，红方直接获胜", at);
+    } else if (blues > 0 && reds === 0) {
+      state.phase = "finished";
+      state.endedAt = at;
+      state.winner = "blue";
+      if (state.roomId !== "global") pushSystem(state, "红方已无人，蓝方直接获胜", at);
+    }
+  }
 };
 
 const applySystemChatCommand = (state: DuelState, event: Extract<DuelEvent, { type: "chat.sent" }>): boolean => {

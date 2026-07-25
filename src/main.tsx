@@ -2558,13 +2558,13 @@ const ProfilePage = () => {
   if (profileLoading) return (
     <main class="profile-page">
       <div class="profile-card profile-skeleton">
-        <div class="profile-skeleton-hero"><i /><div><b /><span /></div><strong /></div>
+        <div class="profile-skeleton-hero"><i /><div><b /><span /></div><div class="profile-skeleton-rating"><em /><strong /></div></div>
         <div class="profile-skeleton-tabs"><i /><i /><i /></div>
         <div class="profile-skeleton-body">
           <div class="profile-skeleton-main"><SkeletonRows count={5} /></div>
           <div class="profile-skeleton-side">
             <div class="profile-skeleton-curve"><span /><strong /></div>
-            <SkeletonRows count={2} compact />
+            <div class="profile-skeleton-stats"><em /><strong /><small /></div>
           </div>
         </div>
       </div>
