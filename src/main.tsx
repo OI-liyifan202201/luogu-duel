@@ -2750,21 +2750,29 @@ const RatingCurve = ({ name }: { name: string }) => {
       <div><span>RATING</span><strong>{Math.round(current)}</strong><em class={current >= first ? "up" : "down"}>{current >= first ? "+" : ""}{Math.round(current - first)}</em></div>
       <svg viewBox={`0 0 ${W} ${H}`} class="rating-svg" aria-hidden="true">
         {points.length > 1 ? (
-          <polyline
-            points={points.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="none"
-            stroke="var(--green)"
-            stroke-width="2.5"
-            stroke-linejoin="round"
-            stroke-linecap="round"
-            vector-effect="non-scaling-stroke"
-          />
+          <>
+            <path
+              d={`M ${points[0].x} ${H} ${points.map((p) => `L ${p.x} ${p.y}`).join(" ")} L ${points.at(-1)!.x} ${H} Z`}
+              fill="var(--green)"
+              opacity="0.07"
+            />
+            <polyline
+              class="rating-line"
+              points={points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke="var(--green)"
+              stroke-width="2.5"
+              stroke-linejoin="round"
+              stroke-linecap="round"
+              vector-effect="non-scaling-stroke"
+            />
+          </>
         ) : null}
         {points.map((p, i) => (
-          <g class="rating-dot" key={i}>
+          <g class={`rating-dot${i === points.length - 1 ? " rating-dot-latest" : ""}`} key={i}>
             <circle cx={p.x} cy={p.y} r="6.5" fill="transparent" />
-            <circle cx={p.x} cy={p.y} r="2.5" fill="var(--green)" />
-            <title>Rating {p.rating} — {new Date(history[i].at).toLocaleDateString("zh-CN")}</title>
+            <circle class="dot-fill" cx={p.x} cy={p.y} r="2.5" fill="var(--green)" />
+            <title>Rating {p.rating} — {new Date(history[i].at).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</title>
           </g>
         ))}
       </svg>
