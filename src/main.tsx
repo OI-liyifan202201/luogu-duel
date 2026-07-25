@@ -20,6 +20,7 @@ import {
   Flame,
   Flag,
   Handshake,
+  House,
   KeyRound,
   LogOut,
   Medal,
@@ -1133,11 +1134,11 @@ const showMatchResult = async (): Promise<void> => {
   const won = player.team === state.winner;
   await Swal.fire({
     title: won ? "胜利" : "失败",
-    text: won ? "本场对决获胜" : "本场对决失利",
+    text: won ? "恭喜本场对决获胜！" : "本场对决失利...",
     imageUrl: won ? "/match-win.png" : "/match-loss.png",
     imageAlt: won ? "胜利动画" : "失败动画",
-    imageWidth: 148,
-    imageHeight: 148,
+    imageWidth: 160,
+    imageHeight: 160,
     confirmButtonText: "知道了",
     customClass: { popup: `duel-swal match-result-swal ${won ? "won" : "lost"}`, confirmButton: "duel-swal-confirm" }
   });
@@ -1704,7 +1705,6 @@ const judgeProblem = async (problem: Problem) => {
   judgingProblems.add(key);
   notify();
   try {
-    startJudgeCooldown();
     let records: DuelState["feed"] = [];
     let hasPending = false;
     do {
@@ -1723,6 +1723,7 @@ const judgeProblem = async (problem: Problem) => {
         await new Promise((resolve) => window.setTimeout(resolve, 5_000));
       }
     } while (hasPending);
+    if (records.some((record) => record.status !== "UKE")) startJudgeCooldown();
     if (!hasPending) setStatus(records.length ? `${problem.pid} 已同步 ${records.length} 条提交` : `${problem.pid} 暂无开赛后的提交`);
   } catch (error) {
     if(error instanceof Error && error.message === "403") {
@@ -1799,7 +1800,7 @@ const Shell = ({ title, subtitle, children }: { title: string; subtitle: string;
                 notify();
               }
             }}>
-              <button onClick={() => { closeUserMenu(); openProfile(identity?.luoguName ?? ""); }}>个人主页</button>
+              <button onClick={() => { closeUserMenu(); openProfile(identity?.luoguName ?? ""); }}><House size={14} />主页</button>
               <button onClick={() => { closeUserMenu(); logout(); }}><LogOut size={14} />登出</button>
             </div> : null}
           </>
@@ -2026,12 +2027,6 @@ const RoomList = () => {
   if (!fresh.length) return <p class="muted">暂无公开房间。</p>;
   return (
     <div class="duel-table">
-      <div class="duel-row duel-head">
-        <span>ID</span>
-        <span>选手</span>
-        <span>难度</span>
-        <span>状态</span>
-      </div>
       {fresh.map((room) => (
         <button class="duel-row" key={room.roomId} disabled={joiningRoom || creatingRoom} onClick={() => void joinRoom(room)} title={roomDifficultyLabel(room) || undefined}>
           <code>{shortRoomId(room.roomId)}</code>
@@ -3280,7 +3275,7 @@ const problemLinks = (problem: Problem): Array<{ label: string; href: string }> 
   return links;
 };
 
-const displayJudgeStatus = (status: DuelState["feed"][number]["status"]): string => status === "UKE" ? "WA" : status;
+const displayJudgeStatus = (status: DuelState["feed"][number]["status"]): string => status;
 
 const logout = () => {
   logoutVJudgeSession();

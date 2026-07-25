@@ -45,5 +45,5 @@ const normalizeVJudgeStatus = (status: string): JudgeStatus => {
   if (normalized.includes("memory limit")) return "MLE";
   if (normalized.includes("output limit")) return "OLE";
   if (normalized.includes("pending") || normalized.includes("running") || normalized.includes("judging") || normalized.includes("processing")) return "PD";
-  return "WA";
+  return "UKE";
 };

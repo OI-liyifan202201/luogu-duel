@@ -1432,7 +1432,7 @@ button.is-loading { cursor: wait; }
 .duel-head > span:last-child,
 .duel-row > em:last-child { text-align: right; }
 
-.room-difficulty { display: inline-flex; justify-content: center; align-items: center; gap: 2px; font: 900 14px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.room-difficulty { display: inline-flex; justify-content: flex-start; align-items: center; gap: 2px; font: 900 14px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: left; }
 .room-difficulty b { overflow: hidden; text-overflow: ellipsis; font: inherit; }
 .room-difficulty i { color: var(--muted); font-style: normal; }
 
@@ -1975,9 +1975,11 @@ img.chat-avatar {
 .chat-vditor .vditor--disabled { opacity: .58; }
 
 .section-head > svg,
-.panel-title > svg { transition: transform 220ms cubic-bezier(.16, 1, .3, 1), color 180ms ease; }
+.panel-title > svg,
+.panel-title > span > svg { transition: transform 220ms cubic-bezier(.16, 1, .3, 1), color 180ms ease; }
 .panel:hover .section-head > svg,
 .panel:hover .panel-title > svg,
+.panel:hover .panel-title > span > svg,
 .command-panel:hover .section-head > svg { color: var(--green); transform: translateY(-1px) rotate(-5deg) scale(1.08); }
 
 .rich-text {
