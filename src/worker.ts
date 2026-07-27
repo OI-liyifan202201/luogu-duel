@@ -331,7 +331,7 @@ export class DuelRoom extends DurableObject<Env> {
           : "";
     const previousPhase = this.cachedState.phase;
     const previousDirectoryFingerprint = directoryFingerprint(this.cachedState);
-    const previousLastEnvelope = this.eventsCache!.at(-1);
+    const previousLastEnvelope = this.eventsCache![this.eventsCache!.length - 1];
 
     if (event.type === "room.configured" && (isLowDifficultyRoom(event.problems) || Number(event.minimumDifficulty) <= 2)) {
       const hostName = event.hostName?.trim() || "";

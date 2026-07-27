@@ -2557,15 +2557,22 @@ const ToastStack = () => {
 const ProfilePage = () => {
   if (profileLoading) return (
     <main class="profile-page">
-      <div class="profile-card profile-skeleton">
-        <div class="profile-skeleton-hero"><i /><div><b /><span /></div><div class="profile-skeleton-rating"><em /><strong /></div></div>
-        <div class="profile-skeleton-tabs"><i /><i /><i /></div>
-        <div class="profile-skeleton-body">
-          <div class="profile-skeleton-main"><SkeletonRows count={5} /></div>
-          <div class="profile-skeleton-side">
-            <div class="profile-skeleton-curve"><span /><strong /></div>
-            <div class="profile-skeleton-stats"><em /><strong /><small /></div>
-          </div>
+      <div class="profile-card profile-loading-skeleton" aria-hidden="true">
+        <header class="profile-hero">
+          <i class="profile-avatar skeleton-shape" />
+          <div class="profile-identity"><small class="skeleton-shape" /><b class="skeleton-shape" /><span class="skeleton-shape" /></div>
+          <div class="profile-rating-summary"><em class="skeleton-shape" /><strong class="skeleton-shape" /></div>
+        </header>
+        <nav class="profile-tabs"><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /></nav>
+        <div class="profile-home-layout">
+          <section class="profile-home-main">
+            <div class="profile-content-head"><b class="skeleton-shape" /><i class="skeleton-shape" /></div>
+            <div class="profile-home-scroll profile-skeleton-copy"><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /></div>
+          </section>
+          <aside class="profile-sidebar">
+            <section class="rating-curve-card profile-skeleton-chart"><div><i class="skeleton-shape" /><strong class="skeleton-shape" /></div><span class="skeleton-shape" /></section>
+            <div class="profile-stats"><i class="skeleton-shape" /><strong class="skeleton-shape" /><small class="skeleton-shape" /></div>
+          </aside>
         </div>
       </div>
     </main>
@@ -2774,7 +2781,7 @@ const RatingCurve = ({ name }: { name: string }) => {
   floor = Math.floor(floor);
   ceiling = Math.ceil(ceiling);
   const first = history[0].rating;
-  const current = history.at(-1)?.rating ?? first;
+  const current = history.length ? history[history.length - 1].rating : first;
 
   const cssVar = (n: string, fallback: string): string =>
     getComputedStyle(document.documentElement).getPropertyValue(n).trim() || fallback;
@@ -2941,6 +2948,12 @@ const vditorPreviewOptions = () => {
   };
 };
 
+// Vditor 3.11.2 invokes this callback unconditionally in WYSIWYG mode even
+// though its public options type and default options do not provide it.
+const vditorWysiwygWorkaround = {
+  customWysiwygToolbar: (_type: string, _element: HTMLElement) => undefined
+};
+
 const setVditorTheme = (editor: VditorType | null) => {
   if (!editor) return;
   const theme = currentVditorTheme();
@@ -2972,7 +2985,9 @@ const mountChatVditor = async (target: HTMLDivElement) => {
   const generation = chatVditorGeneration;
   const { default: Vditor } = await loadVditor();
   if (generation !== chatVditorGeneration || !target.isConnected) return;
-  const editor = new Vditor(target, {
+  let editor: VditorType;
+  editor = new Vditor(target, {
+    ...vditorWysiwygWorkaround,
     mode: "wysiwyg",
     value: draft.chat,
     lang: "zh_CN",
@@ -2989,9 +3004,15 @@ const mountChatVditor = async (target: HTMLDivElement) => {
       draft.chat = value;
       void submitChat();
     },
-    after: () => syncChatVditorState()
-  });
-  chatVditor = editor;
+    after: () => {
+      if (generation !== chatVditorGeneration || !target.isConnected) {
+        editor.destroy();
+        return;
+      }
+      chatVditor = editor;
+      syncChatVditorState();
+    }
+  } as ConstructorParameters<typeof Vditor>[1]);
 };
 
 const chatVditorRef = (element: HTMLDivElement | null) => {
@@ -3015,7 +3036,9 @@ const mountProfileVditor = async () => {
   destroyProfileVditor();
   const { default: Vditor } = await loadVditor();
   if (!target.isConnected || !draft.profileEditing) return;
-  const editor = new Vditor(target, {
+  let editor: VditorType;
+  editor = new Vditor(target, {
+    ...vditorWysiwygWorkaround,
     mode: "wysiwyg",
     value: draft.profileDraft,
     lang: "zh_CN",
@@ -3027,9 +3050,15 @@ const mountProfileVditor = async () => {
     toolbar: ["headings", "bold", "italic", "strike", "|", "quote", "list", "ordered-list", "check", "|", "link", "table", "code", "inline-code", "|", "undo", "redo", "fullscreen"],
     preview: vditorPreviewOptions(),
     input: (value) => { draft.profileDraft = value; },
-    ctrlEnter: (value) => void persistUserProfile(profileUserName || identity.luoguName, value)
-  });
-  profileVditor = editor;
+    ctrlEnter: (value) => void persistUserProfile(profileUserName || identity.luoguName, value),
+    after: () => {
+      if (!target.isConnected || !draft.profileEditing) {
+        editor.destroy();
+        return;
+      }
+      profileVditor = editor;
+    }
+  } as ConstructorParameters<typeof Vditor>[1]);
 };
 
 const mountVditorPreview = (element: HTMLDivElement | null, source: string) => {

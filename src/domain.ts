@@ -676,7 +676,7 @@ const cloneModerationMap = (map: Record<string, ModerationRecord>): Record<strin
   Object.fromEntries(Object.entries(map).map(([key, value]) => [key, { ...value }]));
 
 const pushSystem = (state: DuelState, text: string, at: number) => {
-  const last = state.system.at(-1);
+  const last = state.system[state.system.length - 1];
   if (last && last.text === text) return;
   state.system.push({
     id: `${at}:${state.system.length}:${text}`,

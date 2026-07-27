@@ -521,15 +521,45 @@ body .duel-swal-deny {
   inset: 0;
   z-index: 1000;
   display: grid;
+  place-items: center;
   padding: 14px;
   overflow: hidden;
-  background: transparent;
+  background: var(--bg);
 }
 
 .boot-screen.leaving {
   pointer-events: none;
   animation: boot-fade-out 260ms ease forwards;
 }
+
+.boot-auth-skeleton { animation: none; }
+.boot-auth-skeleton .auth-intro > *,
+.boot-auth-skeleton .paste-login > strong,
+.boot-auth-tabs > *,
+.boot-auth-skeleton .paste-login > span,
+.boot-auth-lines > *,
+.boot-auth-skeleton footer > * {
+  display: block;
+  overflow: hidden;
+  border-radius: 5px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 10%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 24%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 10%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+.boot-auth-skeleton .auth-intro > i { width: 38px; height: 38px; border-radius: 50%; }
+.boot-auth-skeleton .auth-intro > small { width: 118px; height: 10px; margin-top: 24px; }
+.boot-auth-skeleton .auth-intro > strong { width: min(250px, 90%); height: 28px; margin-top: 12px; }
+.boot-auth-skeleton .auth-intro > span { width: 150px; height: 13px; margin-top: 12px; }
+.boot-auth-skeleton .paste-login > strong { width: 82px; height: 16px; }
+.boot-auth-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.boot-auth-tabs > i { height: 36px; }
+.boot-auth-skeleton .paste-login > span { width: 100%; height: 36px; }
+.boot-auth-lines { display: grid; gap: 7px; padding: 4px 8px; }
+.boot-auth-lines > i { width: 78%; height: 10px; }
+.boot-auth-lines > i + i { width: 88%; }
+.boot-auth-skeleton footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.boot-auth-skeleton footer i { width: 110px; height: 12px; }
+.boot-auth-skeleton footer b { width: 100px; height: 36px; }
 
 .boot-skeleton {
   width: min(1500px, 100%);
@@ -667,6 +697,10 @@ body .duel-swal-deny {
   .profile-skeleton-hero i { width: 64px; height: 64px; }
   .profile-skeleton-rating, .room-loading-head > strong { grid-column: 1 / -1; grid-template-columns: auto auto; justify-content: space-between; align-items: center; min-width: 0; border-top: 1px solid var(--line-soft); border-left: 0; padding: 10px 0 0; }
   .profile-skeleton-rating em { margin: 0; }
+  .boot-screen { place-items: start center; padding: 12px; }
+  .boot-auth-skeleton { width: 100%; }
+  .boot-auth-skeleton footer { align-items: stretch; flex-direction: column; }
+  .boot-auth-skeleton footer i, .boot-auth-skeleton footer b { width: 100%; }
 }
 
 .session-menu {
@@ -815,6 +849,38 @@ body .duel-swal-deny {
 .profile-skeleton-stats em { width: 64px; height: 10px; }
 .profile-skeleton-stats strong { width: 84px; height: 30px; }
 .profile-skeleton-stats small { width: 96px; height: 12px; }
+
+/* Reuse the loaded profile's structure so its grid tracks and breakpoints
+   cannot drift away from the loading state. */
+.profile-loading-skeleton { animation: none; }
+.profile-loading-skeleton .skeleton-shape {
+  display: block;
+  overflow: hidden;
+  border-radius: 5px;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--muted) 12%, var(--panel)) 30%, color-mix(in srgb, var(--muted) 26%, var(--panel)) 50%, color-mix(in srgb, var(--muted) 12%, var(--panel)) 70%);
+  background-size: 300% 100%;
+  animation: skeleton-shimmer 1.45s linear infinite;
+}
+.profile-loading-skeleton .profile-identity small { width: 118px; height: 10px; margin-bottom: 10px; }
+.profile-loading-skeleton .profile-identity b { width: min(360px, 72%); height: 44px; }
+.profile-loading-skeleton .profile-identity span { width: min(240px, 55%); height: 13px; margin-top: 12px; }
+.profile-loading-skeleton .profile-rating-summary em { width: 56px; height: 10px; }
+.profile-loading-skeleton .profile-rating-summary strong { width: 110px; height: 34px; }
+.profile-loading-skeleton .profile-tabs i { flex: 0 1 92px; height: 34px; }
+.profile-loading-skeleton .profile-content-head b { width: 96px; height: 18px; }
+.profile-loading-skeleton .profile-content-head i { width: 92px; height: 34px; }
+.profile-skeleton-copy { display: grid; align-content: start; gap: 14px; padding: 12px; }
+.profile-skeleton-copy i { width: 100%; height: 14px; }
+.profile-skeleton-copy i:nth-child(2) { width: 82%; }
+.profile-skeleton-copy i:nth-child(3) { width: 92%; }
+.profile-skeleton-copy i:nth-child(4) { width: 64%; }
+.profile-skeleton-chart > div { display: flex; align-items: center; gap: 8px; }
+.profile-skeleton-chart > div i { width: 64px; height: 10px; }
+.profile-skeleton-chart > div strong { width: 84px; height: 26px; }
+.profile-skeleton-chart > span { position: absolute; inset: 42px 14px 14px; width: auto; height: auto; }
+.profile-loading-skeleton .profile-stats i { width: 64px; height: 10px; }
+.profile-loading-skeleton .profile-stats strong { width: 84px; height: 30px; }
+.profile-loading-skeleton .profile-stats small { width: 96px; height: 12px; }
 
 /* ===== 比赛入口骨架图（适配新的 room-grid / match-island UI） ===== */
 .room-grid.room-loading { padding: 14px; }

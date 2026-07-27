@@ -16,9 +16,9 @@ export const SkeletonRows = ({ count = 5, compact = false }: SkeletonRowsProps) 
 );
 
 export const RoomListSkeleton = () => (
-  <div class="room-list-skeleton" aria-hidden="true">
+  <div class="duel-table room-list-skeleton" aria-hidden="true">
     {Array.from({ length: 6 }, (_, index) => (
-      <div key={index}>
+      <div class="duel-row skeleton-item" key={index}>
         <code />
         <span class="sk-line"><b /><i /></span>
         <span class="sk-diff"><b /><em /></span>
@@ -28,23 +28,19 @@ export const RoomListSkeleton = () => (
   </div>
 );
 
-export const RankingSkeleton = () => <div class="ranking-skeleton" aria-hidden="true">{Array.from({ length: 7 }, (_, index) => <div key={index}><i /><span /><b /><code /><em /></div>)}</div>;
+export const RankingSkeleton = () => <div class="ranking-list ranking-skeleton" aria-hidden="true">{Array.from({ length: 7 }, (_, index) => <div class="ranking-row skeleton-item" key={index}><i /><span /><b /><code /><em /></div>)}</div>;
 
-export const ChatSkeleton = () => <div class="chat-skeleton" aria-hidden="true">{Array.from({ length: 5 }, (_, index) => <div class={index % 3 === 1 ? "mine" : ""} key={index}><i /><span><b /><em /></span></div>)}</div>;
+export const ChatSkeleton = () => <div class="chat-skeleton" aria-hidden="true">{Array.from({ length: 5 }, (_, index) => <div class={`chat-line bubble skeleton-item ${index % 3 === 1 ? "mine" : "theirs"}`} key={index}><i class="chat-avatar" /><span><b /><em /></span></div>)}</div>;
 
-export const AdminPlayersSkeleton = () => <div class="admin-players-skeleton" aria-hidden="true">{Array.from({ length: 7 }, (_, index) => <div key={index}><i /><span><b /><em /></span><label /><button /><strong /></div>)}</div>;
+export const AdminPlayersSkeleton = () => <div class="admin-players-skeleton" aria-hidden="true">{Array.from({ length: 7 }, (_, index) => <div class="admin-player skeleton-item" key={index}><i /><span><b /><em /></span><label /><button /><strong /></div>)}</div>;
 
-export const AdminRoomsSkeleton = () => <div class="admin-rooms-skeleton" aria-hidden="true">{Array.from({ length: 4 }, (_, index) => <div key={index}><code /><span><b /><em /></span><button /></div>)}</div>;
+export const AdminRoomsSkeleton = () => <div class="admin-rooms-skeleton" aria-hidden="true">{Array.from({ length: 4 }, (_, index) => <div class="admin-room skeleton-item" key={index}><code /><span><b /><em /></span><button /></div>)}</div>;
 
 export const BootScreen = ({ leaving }: { leaving: boolean }) => (
   <main class={`boot-screen${leaving ? " leaving" : ""}`} aria-label="正在载入">
-    <div class="boot-skeleton" aria-hidden="true">
-      <header><i /><span /><b /></header>
-      <section class="boot-skeleton-grid">
-        <div class="boot-skeleton-primary"><i /><strong /><span /><span /><b /></div>
-        <div><i /><strong /><SkeletonRows count={4} compact /></div>
-        <div><i /><strong /><SkeletonRows count={5} compact /></div>
-      </section>
-    </div>
+    <section class="auth-card boot-auth-skeleton" aria-hidden="true">
+      <div class="auth-intro"><i /><small /><strong /><span /></div>
+      <div class="paste-login"><strong /><div class="boot-auth-tabs"><i /><i /></div><span /><div class="boot-auth-lines"><i /><i /></div><footer><i /><b /></footer></div>
+    </section>
   </main>
 );
