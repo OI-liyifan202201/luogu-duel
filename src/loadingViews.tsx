@@ -44,3 +44,27 @@ export const BootScreen = ({ leaving }: { leaving: boolean }) => (
     </section>
   </main>
 );
+
+// 个人主页加载骨架：与真实个人主页布局一致，避免看起来像登陆页骨架
+export const ProfileSkeleton = () => (
+  <main class="profile-page">
+    <div class="profile-card profile-loading-skeleton" aria-hidden="true">
+      <header class="profile-hero">
+        <i class="profile-avatar skeleton-shape" />
+        <div class="profile-identity"><small class="skeleton-shape" /><b class="skeleton-shape" /><span class="skeleton-shape" /></div>
+        <div class="profile-rating-summary"><em class="skeleton-shape" /><strong class="skeleton-shape" /></div>
+      </header>
+      <nav class="profile-tabs"><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /></nav>
+      <div class="profile-home-layout">
+        <section class="profile-home-main">
+          <div class="profile-content-head"><b class="skeleton-shape" /><i class="skeleton-shape" /></div>
+          <div class="profile-home-scroll profile-skeleton-copy"><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /></div>
+        </section>
+        <aside class="profile-sidebar">
+          <section class="rating-curve-card profile-skeleton-chart"><div><i class="skeleton-shape" /><strong class="skeleton-shape" /></div><span class="skeleton-shape" /></section>
+          <div class="profile-stats"><i class="skeleton-shape" /><strong class="skeleton-shape" /><small class="skeleton-shape" /></div>
+        </aside>
+      </div>
+    </div>
+  </main>
+);

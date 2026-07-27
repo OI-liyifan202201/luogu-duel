@@ -71,7 +71,7 @@ import { cachedProblemCount, defaultRatios, difficultyMeta, parseCustomProblems,
 import { loadVJudgeSession, logoutVJudgeSession, verifyVJudgeLogin, type VJudgeLoginMethod, type VJudgeSession } from "./oauth";
 import { allowServerRequest, clearRoomDraft, directoryWebSocketUrl, fetchLowRoomAvailability, fetchRooms, fetchSnapshot, fetchUserRecord, fetchUsers, publishEnvelope, roomWebSocketUrl, saveUserRecord, setServerRequestWarningHandler, updateUserRating, type RoomListing, type ServerMessage, type UserRecord } from "./realtimeStore";
 import { fetchVJudgeRecords } from "./vjudge";
-import { AdminPlayersSkeleton, AdminRoomsSkeleton, BootScreen, ChatSkeleton, RankingSkeleton, RoomListSkeleton, SkeletonRows } from "./loadingViews";
+import { AdminPlayersSkeleton, AdminRoomsSkeleton, BootScreen, ChatSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, SkeletonRows } from "./loadingViews";
 import type { ChatMessage, DuelEvent, DuelState, Player, Problem, Seat, SignedEnvelope, VoteKind } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -1765,7 +1765,7 @@ const judgeProblem = async (problem: Problem) => {
 const App = () => {
   if (temporaryBanUntil > Date.now()) return <TemporaryBlockOverlay />;
   if (bootPhase === "loading") {
-    return <BootScreen leaving={false} />;
+    return mode === "profile" ? <ProfileSkeleton /> : <BootScreen leaving={false} />;
   }
   const bootOverlay = bootScreenVisible ? <BootScreen leaving={bootScreenLeaving} /> : null;
   if (bootPhase === "auth-error") {
@@ -2555,28 +2555,7 @@ const ToastStack = () => {
 };
 
 const ProfilePage = () => {
-  if (profileLoading) return (
-    <main class="profile-page">
-      <div class="profile-card profile-loading-skeleton" aria-hidden="true">
-        <header class="profile-hero">
-          <i class="profile-avatar skeleton-shape" />
-          <div class="profile-identity"><small class="skeleton-shape" /><b class="skeleton-shape" /><span class="skeleton-shape" /></div>
-          <div class="profile-rating-summary"><em class="skeleton-shape" /><strong class="skeleton-shape" /></div>
-        </header>
-        <nav class="profile-tabs"><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /></nav>
-        <div class="profile-home-layout">
-          <section class="profile-home-main">
-            <div class="profile-content-head"><b class="skeleton-shape" /><i class="skeleton-shape" /></div>
-            <div class="profile-home-scroll profile-skeleton-copy"><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /><i class="skeleton-shape" /></div>
-          </section>
-          <aside class="profile-sidebar">
-            <section class="rating-curve-card profile-skeleton-chart"><div><i class="skeleton-shape" /><strong class="skeleton-shape" /></div><span class="skeleton-shape" /></section>
-            <div class="profile-stats"><i class="skeleton-shape" /><strong class="skeleton-shape" /><small class="skeleton-shape" /></div>
-          </aside>
-        </div>
-      </div>
-    </main>
-  );
+  if (profileLoading) return <ProfileSkeleton />;
   const name = profileUserName || identity.luoguName;
   const user = userRecordFor(name);
   const row = ratingRowFor(name);
@@ -2650,20 +2629,57 @@ const ProfilePage = () => {
         ) : null}
 
         {draft.profileTab === "matches" ? (
-          <section class="profile-section profile-tab-panel">
-            <h2>最近 20 场</h2>
-            {completedPlayerRooms(name).length
-              ? completedPlayerRooms(name).slice(0, 20).map((room) => <p key={room.roomId}><code>{shortRoomId(room.roomId)}</code><span>{roomLine(room)}</span><em>{roomStatusLabel(room)}</em></p>)
-              : <p class="muted">暂无已结束的对局。</p>}
-          </section>
+          <div class="profile-tab-panel match-list">
+            <div class="match-list-head">
+              <h2>最近 20 场</h2>
+              <span>{completedPlayerRooms(name).length} 场已结束</span>
+            </div>
+            {completedPlayerRooms(name).length ? (
+              <div class="match-rows">
+                {completedPlayerRooms(name).slice(0, 20).map((room) => {
+                  const red = room.redPlayers?.length ? room.redPlayers : [room.host];
+                  const blue = room.bluePlayers ?? [];
+                  return (
+                    <article class={`match-row ${room.winner ? "is-decided" : ""}`} key={room.roomId}>
+                      <div class="match-row-top">
+                        <code class="match-id">{shortRoomId(room.roomId)}</code>
+                        <RoomDifficulty room={room} />
+                        <em class={`match-status ${roomStatusClass(room)}`}>{roomStatusLabel(room)}</em>
+                      </div>
+                      <div class="match-row-teams">
+                        <span class={`mt-team red ${room.winner === "red" ? "win" : ""}`}>
+                          <b class="mt-side">红方</b>
+                          <span class="mt-names">{red.map((n, i) => <>{i ? " / " : null}<b>{n}</b></>)}</span>
+                          {room.winner === "red" ? <i class="mt-win">胜</i> : null}
+                        </span>
+                        <span class="mt-vs">VS</span>
+                        <span class={`mt-team blue ${room.winner === "blue" ? "win" : ""}`}>
+                          <b class="mt-side">蓝方</b>
+                          <span class="mt-names">{blue.length ? blue.map((n, i) => <>{i ? " / " : null}<b>{n}</b></>) : "—"}</span>
+                          {room.winner === "blue" ? <i class="mt-win">胜</i> : null}
+                        </span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : <p class="muted match-empty">暂无已结束的对局。</p>}
+          </div>
         ) : null}
 
         {draft.profileTab === "achievements" ? (
           <div class="achievement-grid profile-tab-panel">
             {achievementsFor(name, row).map((achievement) => (
               <article class={`achievement ${achievement.progress >= 100 ? "complete" : ""}`} key={achievement.title}>
-                <achievement.Icon size={26} />
-                <div><h3>{achievement.title}</h3><p>{achievement.text}</p><span>进度 {achievement.progress}%</span></div>
+                <div class="achievement-icon"><achievement.Icon size={24} /></div>
+                <div class="achievement-body">
+                  <h3>{achievement.title}</h3>
+                  <p>{achievement.text}</p>
+                  <div class="achievement-progress">
+                    <span class="achievement-bar"><i style={{ width: `${Math.max(0, Math.min(100, achievement.progress))}%` }} /></span>
+                    <em>{achievement.progress}%</em>
+                  </div>
+                </div>
               </article>
             ))}
           </div>
@@ -2763,11 +2779,11 @@ const RatingCurve = ({ name }: { name: string }) => {
   const maximum = Math.max(...ratings);
   // 完全基于数据自适应：先按数据上下各留白，保证所有点都在区间内；
   // 若可视区高度不足 MIN_CHART_RANGE，再向两侧对称扩展（仍以数据为中心，不溢出）。
-  const RATING_PAD = 40;
-  const MIN_CHART_RANGE = 300;
+  const RATING_PAD = 30;
+  const MIN_CHART_RANGE = 150;
 
   const dataRange = maximum - minimum;
-  const padding = Math.max(RATING_PAD, dataRange * 0.15);
+  const padding = Math.max(RATING_PAD, dataRange * 0.1);
   let floor = minimum - padding;
   let ceiling = maximum + padding;
 
