@@ -471,7 +471,7 @@ export class DuelRoom extends DurableObject<Env> {
       return;
     }
     console.log(`[detectCheatAndBan] CHEAT DETECTED: cheater=${record.luoguName}, will ban now`);
-    const reason = "自动检测：判题速度异常（疑似作弊），Rating 已清零";
+    const reason = "自动检测——作弊";
     const kickEnvelope = await systemKickEnvelope(
       this.cachedState.roomId,
       this.cachedState.lamport + 1,
@@ -480,15 +480,11 @@ export class DuelRoom extends DurableObject<Env> {
       player.luoguName,
       reason
     );
-    // 广播顺序：必须先 kick 后 close。_inCheatDetection 阻止 auto-close 在 acceptEnvelope 内广播。
     this._inCheatDetection = true;
     this._autoCloseEnvelope = null;
     const savedKick = await this.acceptEnvelope(kickEnvelope);
     this._inCheatDetection = false;
-    // 1) 先广播 kick
     if (savedKick) this.broadcast({ type: "event", envelope: kickEnvelope });
-    // 2) 再处理 close：优先用 auto-close 暂存的 envelope（非制胜 AC 路径），
-    //    否则走手动补发 close（制胜 AC / winning AC 路径）。
     if (this._autoCloseEnvelope) {
       this.broadcast({ type: "event", envelope: this._autoCloseEnvelope });
       this._autoCloseEnvelope = null;
@@ -982,7 +978,7 @@ export class DuelRoom extends DurableObject<Env> {
   // 并阻止其再次创建/加入房间。rating 清零已在 applyCheatResult 中完成。
   private async enforceGlobalCheatBan(cheaterName: string): Promise<void> {
     try {
-      const reason = "作弊检测：判题速度异常，Rating 已清零";
+      const reason = "自动检测——作弊";
       const now = Date.now();
       const envelope = await systemKickEnvelope("global", now, now, `name:${normalizeName(cheaterName)}`, cheaterName, reason);
       const response = await this.env.DUEL_ROOM.getByName("global:public-lobby").fetch("https://duel.internal/event", {

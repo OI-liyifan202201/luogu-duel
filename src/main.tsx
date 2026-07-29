@@ -1222,19 +1222,16 @@ const markCheatNotified = (roomId: string, role: "cheater" | "participant") => {
   persistCheatNotified();
 };
 
-const cheatEmojiUrl = "https://koishi.js.org/QFace/assets/qq_emoji/26/apng/26.png";
-
 const showCheatPopup = async (role: "cheater" | "participant", cheaterName: string, roomId: string): Promise<void> => {
   if (isCheatNotified(roomId, role)) return;
   markCheatNotified(roomId, role);
   if (role === "cheater") {
     await Swal.fire({
       title: "因作弊被封禁",
-      html: "检测到判题速度异常，你的 Rating 已清零，且已被全局封禁。",
-      imageUrl: cheatEmojiUrl,
-      imageAlt: "作弊表情",
-      imageWidth: 140,
-      imageHeight: 140,
+      html: "检测到作弊，你的 Rating 已清零，且已被全局封禁。",
+      imageUrl: "/match-ban.png",
+      imageWidth: 160,
+      imageHeight: 160,
       confirmButtonText: "我知道了",
       customClass: { popup: "duel-swal cheat-swal", confirmButton: "duel-swal-confirm cheat-swal-confirm" }
     });
@@ -1243,17 +1240,14 @@ const showCheatPopup = async (role: "cheater" | "participant", cheaterName: stri
   await Swal.fire({
     title: "检测到作弊者",
     html: `作弊者 <b>${cheaterName || "未知玩家"}</b> 已受到惩罚，本场对决终止。<br/>作为补偿，你获得 <b>+10 Rating</b>。`,
-    imageUrl: cheatEmojiUrl,
-    imageAlt: "作弊表情",
-    imageWidth: 140,
-    imageHeight: 140,
+    imageUrl: "/match-ban.png",
+    imageWidth: 160,
+    imageHeight: 160,
     confirmButtonText: "知道了",
     customClass: { popup: "duel-swal cheat-swal", confirmButton: "duel-swal-confirm cheat-swal-confirm" }
   });
 };
 
-// 主页（或任意页面）目录更新时，为"未在作弊房间内收到弹窗"的参赛者补发通知。
-// 作弊者主页的持续提示由全局封禁触发的 BanOverlay 承担，这里只标记避免重复处理。
 const drainHomeCheatNotices = () => {
   if (!identity) return;
   const me = normalizeName(identity.luoguName);
@@ -1964,7 +1958,7 @@ const Home = () => (
         <div class="announcement-actions">
           <button type="button" class="sponsor-trigger" onClick={() => void showSponsorCode()}>赞助</button>
           <button type="button" class="rules-ticket" onClick={() => window.open('https://gengen.qzz.io/duel/rule.html', '_blank')}>
-            规则与工单
+            规则
           </button>
         </div>
         <BanAnnouncement />
@@ -3497,8 +3491,8 @@ const showFirstVisitRules = async () => {
     // Keep the in-memory guard when persistent storage is unavailable.
   }
   await Swal.fire({
-    title: "规则与工单",
-    html: '<p class="first-visit-rules-text">开始对决前，请先阅读使用规则。遇到问题也可以在这里提交工单。</p><a class="first-visit-rules-link" href="https://www.luogu.me/article/fgiidurs" target="_blank" rel="noopener noreferrer">打开规则与工单</a>',
+    title: "规则",
+    html: '<p class="first-visit-rules-text">开始对决前，请先阅读使用规则。</p><a class="first-visit-rules-link" href="https://gengen.qzz.io/duel/rule" target="_blank" rel="noopener noreferrer">打开规则</a>',
     confirmButtonText: "关闭",
     customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
   });
@@ -3511,8 +3505,8 @@ const showFirstVisitRules = async () => {
 type ExamQuestion = {
   id: string;
   question: string;
-  options: string[];       // 4 个选项文本
-  correctIndex: number;    // 0-based 正确选项索引
+  options: string[];
+  correctIndex: number;
 };
 
 const EXAM_PASSED_KEY = "vjudge-duel.exam-passed.v2";
@@ -3578,8 +3572,8 @@ const isExamPassed = (): boolean => {
 };
 
 const isExamRequired = (): boolean => {
-  // 通过后不再需要考试；管理员豁免
-  if (isExamPassed() || isAdmin()) return false;
+  // 通过后不再需要考试；
+  if (isExamPassed()) return false;
   return true;
 };
 
