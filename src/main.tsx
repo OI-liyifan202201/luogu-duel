@@ -3293,13 +3293,20 @@ const BanAnnouncement = () => {
   return (
     <div class="ban-announcement">
       <details>
-        <summary><strong>封禁公告</strong></summary>
-        {entries.map(([name, record]) => (
-          <p key={name}>
-            <b>{name}</b>
-            <span>{record.reason}</span>
-          </p>
-        ))}
+        <summary>
+          <span class="ban-announcement-icon" aria-hidden="true">⚠</span>
+          <span class="ban-announcement-title">封禁公告</span>
+          <span class="ban-announcement-count">{entries.length}</span>
+          <span class="ban-announcement-chevron" aria-hidden="true">▾</span>
+        </summary>
+        <div class="ban-announcement-list">
+          {entries.map(([name, record]) => (
+            <div class="ban-card" key={name}>
+              <b class="ban-card-name">{name}</b>
+              <p class="ban-card-reason">{record.reason}</p>
+            </div>
+          ))}
+        </div>
       </details>
     </div>
   );

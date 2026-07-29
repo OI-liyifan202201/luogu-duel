@@ -1472,37 +1472,109 @@ button.is-loading { cursor: wait; }
 .rating-curve-card em.down { color: var(--red); }
 .rating-curve-card canvas { position: absolute; inset: 28px 0 0; width: 100%; height: calc(100% - 28px); display: block; }
 
+/* ---- Ban announcement (collapsible) ---- */
 .ban-announcement {
+  margin-top: 12px;
+}
+
+.ban-announcement details {
+  border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line-soft));
+  border-radius: var(--panel-radius);
+  background: color-mix(in srgb, var(--red) 8%, var(--panel));
+  overflow: hidden;
+}
+
+.ban-announcement summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 12px;
+  color: var(--danger-text);
+  font-weight: 800;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+.ban-announcement summary::-webkit-details-marker { display: none; }
+
+.ban-announcement summary:hover {
+  background: color-mix(in srgb, var(--red) 14%, var(--panel));
+}
+
+.ban-announcement summary:active {
+  background: color-mix(in srgb, var(--red) 20%, var(--panel));
+}
+
+.ban-announcement-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--red) 22%, var(--panel));
+  font-size: 12px;
+  line-height: 1;
+}
+
+.ban-announcement-title {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.ban-announcement-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--red);
+  color: var(--on-accent);
+  font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.ban-announcement-chevron {
+  margin-left: auto;
+  font-size: 12px;
+  transition: transform 0.2s ease;
+}
+.ban-announcement details[open] .ban-announcement-chevron {
+  transform: rotate(180deg);
+}
+
+.ban-announcement-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
-  margin-top: 10px;
-  border-top: 1px solid var(--line-soft);
-  padding-top: 9px;
-}
-
-.ban-announcement > strong {
-  grid-column: 1 / -1;
-  color: var(--danger-text);
-  font: 900 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-.ban-announcement p {
-  display: grid;
-  grid-template-columns: minmax(74px, auto) minmax(0, 1fr);
   gap: 8px;
-  margin: 0;
+  padding: 10px 12px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--red) 30%, var(--line-soft));
+}
+
+.ban-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   border: 1px solid var(--line-soft);
-  border-radius: 4px;
-  padding: 7px;
-  font-size: 12px;
+  border-radius: var(--control-radius);
+  background: color-mix(in srgb, var(--panel-alt) 60%, var(--panel));
+  padding: 8px 10px;
 }
 
-.ban-announcement b {
+.ban-card-name {
   color: var(--danger-text);
+  font-weight: 800;
+  font-size: 12.5px;
+  word-break: break-all;
 }
 
-.ban-announcement span {
+.ban-card-reason {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
@@ -3130,7 +3202,7 @@ body .cheat-swal-confirm.duel-swal-confirm:hover {
   .school-code-box > span { grid-column: 1 / -1; }
   .school-code-box output { min-width: 0; font-size: 19px; letter-spacing: 2px; }
   .school-code-box button { min-height: 40px; }
-  .ban-announcement { grid-template-columns: 1fr; }
+  .ban-announcement-list { grid-template-columns: 1fr; }
   .profile-page { padding: 10px; height: auto; min-height: 0; overflow: visible; }
   .profile-card { display: block; height: auto; max-height: none; overflow: visible; padding: 12px; }
   .profile-home-layout { display: block; flex: initial; min-height: initial; }
