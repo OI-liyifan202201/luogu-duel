@@ -2191,9 +2191,7 @@ const RoomLineView = ({ room }: { room: RoomListing }) => {
   const blue = room.bluePlayers ?? [];
   if (room.cheatBanned) {
     const cheater = room.cheaterName ?? "作弊者";
-    const survivors = [...(room.redPlayers ?? []), ...(room.bluePlayers ?? [])].filter((name) => normalizeName(name) !== normalizeName(cheater));
-    const names = survivors.length ? survivors : [room.host];
-    return <span class="room-line"><PlayerNameList names={names} /> <span class="room-cheater">{cheater}</span></span>;
+    return <span class="room-line"><span class="room-cheater">{cheater} <em>封禁</em></span></span>;
   }
   if (isClosedListing(room)) {
     return <span class="room-line"><PlayerNameList names={[room.host]} /> <em class="result-closed">已关闭：{room.closedReason || "房间已关闭"}</em></span>;
@@ -3294,8 +3292,15 @@ const BanAnnouncement = () => {
   if (!entries.length) return null;
   return (
     <div class="ban-announcement">
-      <strong>封禁公告</strong>
-      {entries.map(([name, record]) => <p key={name}><b>{name}</b><span>{record.reason}</span></p>)}
+      <details>
+        <summary><strong>封禁公告</strong></summary>
+        {entries.map(([name, record]) => (
+          <p key={name}>
+            <b>{name}</b>
+            <span>{record.reason}</span>
+          </p>
+        ))}
+      </details>
     </div>
   );
 };
