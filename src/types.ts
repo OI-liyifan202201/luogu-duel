@@ -201,6 +201,7 @@ export type DuelEvent =
       lamport: number;
       issuedAt: number;
       record: FeedRecord;
+      cheatExempt?: boolean;
     }
   | {
       type: "room.closed";
@@ -211,6 +212,7 @@ export type DuelEvent =
       issuedAt: number;
       reason: string;
       actorName: string;
+      system?: boolean;
     }
   | {
       type: "player.kicked";
@@ -222,6 +224,8 @@ export type DuelEvent =
       targetId: string;
       targetName?: string;
       reason: string;
+      system?: boolean;
+      by?: string;
     }
   | {
       type: "player.unkicked";

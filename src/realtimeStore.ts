@@ -17,6 +17,9 @@ export type RoomListing = {
   closedReason?: string;
   redPlayers?: string[];
   bluePlayers?: string[];
+  // 作弊封禁：比赛因作弊取消时由后端标记，前端据此保留房间证据并显示"已封禁"。
+  cheatBanned?: boolean;
+  cheaterName?: string;
 };
 
 export type UserRecord = {

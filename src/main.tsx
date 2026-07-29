@@ -78,7 +78,7 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing #app");
 
 type BootPhase = "loading" | "auth-error" | "ready";
-type ViewMode = "home" | "room" | "profile" | "admin";
+type ViewMode = "home" | "room" | "profile" | "admin" | "exam";
 
 function profileNameFromPath(): string {
   const match = decodeURIComponent(location.pathname).match(/^\/user\/([^/]+)\/?$/);
@@ -242,7 +242,6 @@ const directoryCacheKey = "vjudge-duel.directory-cache";
 const eventCacheKey = (id: string) => `vjudge-duel.events.${dataVersion}.${id}`;
 const announcementCacheKey = "vjudge-duel.announcement";
 const firstVisitRulesKey = "vjudge-duel.rules-seen.v1";
-const judgeCooldownKey = () => `vjudge-duel.judge-cooldown.${normalizeName(identity?.luoguName ?? "anonymous")}`;
 const temporaryBanKey = "vjudge-duel.security.ban-until";
 const temporaryBanReasonKey = "vjudge-duel.security.ban-reason";
 const temporaryMuteKey = "vjudge-duel.security.mute-until";
@@ -416,10 +415,25 @@ const boot = async () => {
   await registerCurrentUser();
   await enterFromHash();
   finishBootScreen();
-  scheduleFirstVisitRules();
+  // scheduleFirstVisitRules(); // 已移除首次规则弹窗
+  // TODO: 考试系统上线后取消注释，强制未通过考试的用户跳转到 /exam
+  // if (mode !== "exam" && isExamRequired() && location.pathname !== "/exam") {
+  //   location.replace("/exam");
+  //   return;
+  // }
 };
 
 const enterFromHash = async () => {
+  // 规则考试页面
+  if (location.pathname === "/exam" || location.pathname.startsWith("/exam?")) {
+    mode = "exam";
+    roomId = "global";
+    roomSecret = "public-lobby";
+    closeSocket();
+    if (!examStarted) startExam();
+    notify();
+    return;
+  }
   const params = new URLSearchParams(location.hash.slice(1));
   const profileName = profileNameFromPath();
   const adminRequested = params.get("admin") === "1";
@@ -877,6 +891,7 @@ const handleDirectoryMessage = async (raw: string) => {
     lastDirectoryLiveAt = Date.now();
     statusTone = "info";
     statusText = "大厅在线";
+    drainHomeCheatNotices();
   }
   if (message.type === "users") {
     users = dedupeUserRecords(message.users);
@@ -1026,6 +1041,15 @@ const emit = async (event: DuelEvent) => {
   }
 };
 
+const isCheatClose = (): boolean => state.phase === "finished" && Boolean(state.closed?.reason?.includes("作弊"));
+
+const cheaterDisplayName = (): string => {
+  const bannedKeys = Object.keys(state.banned);
+  if (!bannedKeys.length) return "";
+  const player = Object.values(state.players).find((p) => state.banned[normalizeName(p.luoguName)]);
+  return player?.luoguName ?? bannedKeys[0];
+};
+
 const pushToastsForEvent = (event: DuelEvent, previousPhase: DuelState["phase"], previousSystemCount: number) => {
   if (mode !== "room" && event.roomId !== "global") return;
   if (event.type === "game.started") {
@@ -1035,9 +1059,27 @@ const pushToastsForEvent = (event: DuelEvent, previousPhase: DuelState["phase"],
     }
   }
   if (previousPhase !== "finished" && state.phase === "finished") {
-    const text = state.closed?.reason ?? (state.winner === "draw" ? "双方平局" : `${teamName(state.winner)} 获胜`);
-    notifyImportant(`end:${roomId}:${state.closed?.at ?? event.issuedAt}:${text}`, "比赛结束", text, "warning");
-    void showMatchResult();
+    // 作弊导致的比赛终止：作弊者看到封禁弹窗，其余参赛者看到终止 + +10 通知。
+    if (isCheatClose()) {
+      const cheater = cheaterDisplayName();
+      const meCheater = Boolean(state.banned[normalizeName(identity?.luoguName ?? "")]);
+      const meParticipant = Boolean(state.players[identity?.id ?? ""]) && isTeam(state.players[identity?.id ?? ""]?.team);
+      if (meCheater) void showCheatPopup("cheater", cheater, roomId);
+      else if (meParticipant) void showCheatPopup("participant", cheater, roomId);
+    } else {
+      const text = state.closed?.reason ?? (state.winner === "draw" ? "双方平局" : `${teamName(state.winner)} 获胜`);
+      notifyImportant(`end:${roomId}:${state.closed?.at ?? event.issuedAt}:${text}`, "比赛结束", text, "warning");
+      if (state.closed?.by !== "System") void showMatchResult();
+    }
+  }
+  // 作弊封禁覆盖：作弊 AC 同时是制胜 AC 时，"胜利"先于封禁到达，上面的 finish 分支不会触发。
+  // 收到 system 作弊 close 事件时，无论之前 phase 如何，都补发对应角色弹窗（showCheatPopup 自带去重）。
+  if (event.type === "room.closed" && isCheatClose() && state.closed?.at === event.issuedAt && previousPhase === "finished") {
+    const cheater = cheaterDisplayName();
+    const meCheater = Boolean(state.banned[normalizeName(identity?.luoguName ?? "")]);
+    const meParticipant = Boolean(state.players[identity?.id ?? ""]) && isTeam(state.players[identity?.id ?? ""]?.team);
+    if (meCheater) void showCheatPopup("cheater", cheater, roomId);
+    else if (meParticipant) void showCheatPopup("participant", cheater, roomId);
   }
   if (event.type === "chat.sent" && event.visibility === "team" && state.phase === "arena") {
     const chat = state.chats.find((item) => item.id === event.id);
@@ -1163,6 +1205,68 @@ const showMatchResult = async (): Promise<void> => {
     confirmButtonText: "知道了",
     customClass: { popup: `duel-swal match-result-swal ${won ? "won" : "lost"}`, confirmButton: "duel-swal-confirm" }
   });
+};
+
+// 作弊通知去重：按 roomId+role 记录已弹窗，避免在房间内与主页之间重复弹出。
+const cheatNotifiedStorageKey = "luogu-duel.cheat-notified.v1";
+let cheatNotifiedSet = new Set<string>(readCheatNotified());
+function readCheatNotified(): string[] {
+  try { return JSON.parse(localStorage.getItem(cheatNotifiedStorageKey) || "[]") as string[]; } catch { return []; }
+}
+const persistCheatNotified = () => {
+  try { localStorage.setItem(cheatNotifiedStorageKey, JSON.stringify([...cheatNotifiedSet])); } catch { /* ignore */ }
+};
+const isCheatNotified = (roomId: string, role: "cheater" | "participant") => cheatNotifiedSet.has(`${roomId}:${role}`);
+const markCheatNotified = (roomId: string, role: "cheater" | "participant") => {
+  cheatNotifiedSet.add(`${roomId}:${role}`);
+  persistCheatNotified();
+};
+
+const cheatEmojiUrl = "https://koishi.js.org/QFace/assets/qq_emoji/26/apng/26.png";
+
+const showCheatPopup = async (role: "cheater" | "participant", cheaterName: string, roomId: string): Promise<void> => {
+  if (isCheatNotified(roomId, role)) return;
+  markCheatNotified(roomId, role);
+  if (role === "cheater") {
+    await Swal.fire({
+      title: "因作弊被封禁",
+      html: "检测到判题速度异常，你的 Rating 已清零，且已被全局封禁。",
+      imageUrl: cheatEmojiUrl,
+      imageAlt: "作弊表情",
+      imageWidth: 140,
+      imageHeight: 140,
+      confirmButtonText: "我知道了",
+      customClass: { popup: "duel-swal cheat-swal", confirmButton: "duel-swal-confirm cheat-swal-confirm" }
+    });
+    return;
+  }
+  await Swal.fire({
+    title: "检测到作弊者",
+    html: `作弊者 <b>${cheaterName || "未知玩家"}</b> 已受到惩罚，本场对决终止。<br/>作为补偿，你获得 <b>+10 Rating</b>。`,
+    imageUrl: cheatEmojiUrl,
+    imageAlt: "作弊表情",
+    imageWidth: 140,
+    imageHeight: 140,
+    confirmButtonText: "知道了",
+    customClass: { popup: "duel-swal cheat-swal", confirmButton: "duel-swal-confirm cheat-swal-confirm" }
+  });
+};
+
+// 主页（或任意页面）目录更新时，为"未在作弊房间内收到弹窗"的参赛者补发通知。
+// 作弊者主页的持续提示由全局封禁触发的 BanOverlay 承担，这里只标记避免重复处理。
+const drainHomeCheatNotices = () => {
+  if (!identity) return;
+  const me = normalizeName(identity.luoguName);
+  for (const room of rooms) {
+    if (!room.cheatBanned || room.status !== "finished") continue;
+    const cheaterIsMe = Boolean(room.cheaterName) && normalizeName(room.cheaterName!) === me;
+    const participantIsMe = [...(room.redPlayers ?? []), ...(room.bluePlayers ?? [])].some((name) => normalizeName(name) === me);
+    if (cheaterIsMe) {
+      markCheatNotified(room.roomId, "cheater");
+    } else if (participantIsMe && !isCheatNotified(room.roomId, "participant")) {
+      void showCheatPopup("participant", room.cheaterName ?? "", room.roomId);
+    }
+  }
 };
 
 const refreshGlobalModeration = async () => {
@@ -1629,7 +1733,7 @@ const leaveOrCloseCurrentMatchForNewRoom = async (action = "创建新房间"): P
     text: message,
     icon: "warning",
     showCancelButton: true,
-    confirmButtonText: "继续创建",
+    confirmButtonText: `继续${action}`,
     cancelButtonText: "取消",
     background: "var(--panel)",
     color: "var(--text)",
@@ -1727,7 +1831,10 @@ const replaceProblem = async (targetPid: string) => {
 
 const judgeProblem = async (problem: Problem) => {
   const key = `${problem.platform ?? "luogu"}:${problem.pid}`;
-  if (judgingProblems.has(key) || judgeCooldownRemaining() > 0 || state.phase !== "arena" || !state.startedAt) return;
+  if (judgingProblems.has(key) || state.phase !== "arena" || !state.startedAt) {
+    console.log(`[judgeProblem] SKIP early: judgingProblems=${judgingProblems.has(key)}, phase=${state.phase}, startedAt=${state.startedAt}`);
+    return;
+  }
   judgingProblems.add(key);
   notify();
   try {
@@ -1737,9 +1844,12 @@ const judgeProblem = async (problem: Problem) => {
       if (mode !== "room" || state.phase !== "arena" || !state.startedAt) break;
       const players = Object.values(state.players).filter((player) => isTeam(player.team) && !moderationRecordForPlayer(player));
       records = await fetchVJudgeRecords(problem, players.map((player) => player.luoguName), state.startedAt, identity.luoguName);
+      console.log(`[judgeProblem] ${problem.pid}: fetched ${records.length} records from VJudge, players=${players.length}, startedAt=${state.startedAt}`);
       for (const record of records) {
         const existing = state.feed.find((item) => item.recordId === record.recordId && item.pid === record.pid);
-        if (!existing || existing.status !== record.status || existing.at !== record.at) {
+        const willEmit = !existing || existing.status !== record.status || existing.at !== record.at;
+        console.log(`[judgeProblem]   record: pid=${record.pid}, status=${record.status}, at=${record.at}, luoguName=${record.luoguName}, existing=${!!existing}, willEmit=${willEmit}`);
+        if (willEmit) {
           await emit({ ...baseEvent("judge.recordSeen"), record });
         }
       }
@@ -1749,7 +1859,6 @@ const judgeProblem = async (problem: Problem) => {
         await new Promise((resolve) => window.setTimeout(resolve, 5_000));
       }
     } while (hasPending);
-    if (records.some((record) => record.status !== "UKE")) startJudgeCooldown();
     if (!hasPending) setStatus(records.length ? `${problem.pid} 已同步 ${records.length} 条提交` : `${problem.pid} 暂无开赛后的提交`);
   } catch (error) {
     if(error instanceof Error && error.message === "403") {
@@ -1778,9 +1887,11 @@ const App = () => {
   }
   return (
     <>
+      {mode === "exam" ? <ExamPage /> : (
       <Shell title="VJudge Duel" subtitle={mode === "profile" ? "user" : mode === "admin" ? "admin" : mode === "home" ? "control room" : `${roomId} / ${state.phase}`}>
         {mode === "profile" ? <ProfilePage /> : mode === "admin" ? <AdminPage /> : mode === "home" ? <Home /> : <Room />}
       </Shell>
+      )}
       <ToastStack />
       <BanOverlay />
       {bootOverlay}
@@ -1852,7 +1963,7 @@ const Home = () => (
         <RichText text={announcementContent} className="announcement-content" />
         <div class="announcement-actions">
           <button type="button" class="sponsor-trigger" onClick={() => void showSponsorCode()}>赞助</button>
-          <button type="button" class="rules-ticket" onClick={() => window.open('https://www.luogu.me/article/fgiidurs', '_blank')}>
+          <button type="button" class="rules-ticket" onClick={() => window.open('https://gengen.qzz.io/duel/rule.html', '_blank')}>
             规则与工单
           </button>
         </div>
@@ -2055,13 +2166,13 @@ const ScoreBar = () => {
 };
 
 const RoomList = () => {
-  const fresh = sortedRooms().filter((room) => !(room.status === "finished" && !room.winner && playerCount(room) <= 1)).slice(0, 20);
+  const fresh = sortedRooms().filter((room) => !(room.status === "finished" && !room.winner && !room.cheatBanned && playerCount(room) <= 1)).slice(0, 20);
   if (!directoryLiveSnapshotReceived && !fresh.length) return <RoomListSkeleton />;
   if (!fresh.length) return <p class="muted">暂无公开房间。</p>;
   return (
     <div class="duel-table">
       {fresh.map((room) => (
-        <button class="duel-row" key={room.roomId} disabled={joiningRoom || creatingRoom} onClick={() => void joinRoom(room)} title={roomDifficultyLabel(room) || undefined}>
+        <button class={`duel-row${room.cheatBanned ? " cheat-row" : ""}`} key={room.roomId} disabled={joiningRoom || creatingRoom} onClick={() => void joinRoom(room)} title={roomDifficultyLabel(room) || undefined}>
           <code>{shortRoomId(room.roomId)}</code>
           <RoomLineView room={room} />
           <RoomDifficulty room={room} />
@@ -2084,6 +2195,12 @@ const sortedRooms = (): RoomListing[] => {
 const RoomLineView = ({ room }: { room: RoomListing }) => {
   const red = room.redPlayers?.length ? room.redPlayers : [room.host];
   const blue = room.bluePlayers ?? [];
+  if (room.cheatBanned) {
+    const cheater = room.cheaterName ?? "作弊者";
+    const survivors = [...(room.redPlayers ?? []), ...(room.bluePlayers ?? [])].filter((name) => normalizeName(name) !== normalizeName(cheater));
+    const names = survivors.length ? survivors : [room.host];
+    return <span class="room-line"><PlayerNameList names={names} /> <span class="room-cheater">{cheater}</span></span>;
+  }
   if (isClosedListing(room)) {
     return <span class="room-line"><PlayerNameList names={[room.host]} /> <em class="result-closed">已关闭：{room.closedReason || "房间已关闭"}</em></span>;
   }
@@ -2115,6 +2232,7 @@ const PlayerNameList = ({ names }: { names: string[] }) => (
 const roomLine = (room: RoomListing): string => {
   const red = (room.redPlayers?.length ? room.redPlayers : [room.host]).join(" & ");
   const blue = (room.bluePlayers ?? []).join(" & ");
+  if (room.cheatBanned) return `${red || room.host} 的房间因作弊封禁（${room.cheaterName ?? "作弊者"}）`;
   if (isClosedListing(room)) return `${room.host} 的房间已关闭${room.closedReason ? `：${room.closedReason}` : ""}`;
   if (room.status === "finished" && room.winner && room.winner !== "draw") {
     const winner = room.winner === "red" ? red : blue || "蓝方";
@@ -2127,7 +2245,7 @@ const roomLine = (room: RoomListing): string => {
 };
 
 const roomStatusLabel = (room: RoomListing): string =>
-  isClosedListing(room) ? "已关闭" : room.status === "lobby" ? "准备" : room.status === "arena" ? "进行中" : room.winner ? "已结束" : "已关闭";
+  room.cheatBanned ? "已封禁" : isClosedListing(room) ? "已关闭" : room.status === "lobby" ? "准备" : room.status === "arena" ? "进行中" : room.winner ? "已结束" : "已关闭";
 
 const roomDifficultyLabel = (room: RoomListing): string => {
   if (!room.averageDifficulty && !room.minimumDifficulty && !room.maximumDifficulty) return "";
@@ -2156,7 +2274,7 @@ const RoomDifficulty = ({ room }: { room: RoomListing }) => {
 };
 
 const roomStatusClass = (room: RoomListing): string =>
-  isClosedListing(room) || (room.status === "finished" && !room.winner) ? "closed" : room.status;
+  room.cheatBanned ? "cheat" : isClosedListing(room) || (room.status === "finished" && !room.winner) ? "closed" : room.status;
 
 const isClosedListing = (room: RoomListing): boolean =>
   Boolean(room.closedReason) || (room.status === "lobby" && Boolean(room.endedAt));
@@ -2175,17 +2293,34 @@ const Ranking = () => {
   const rows = ratingRows();
   if (!usersLoaded) return <RankingSkeleton />;
   if (!rows.length) return <p class="muted">暂无注册用户。</p>;
+  const myKey = normalizeName(identity?.luoguName ?? "");
+  const mineRow = myKey ? rows.find((row) => normalizeName(row.name) === myKey) : undefined;
+  const mineRank = mineRow ? rows.indexOf(mineRow) + 1 : -1;
+  const top = rows.slice(0, 100);
   return (
     <div class="ranking-list">
-      {rows.map((row, index) => (
-        <button class="ranking-row" key={row.name} onClick={() => openProfile(row.name)}>
-          <span>#{index + 1}</span>
-          <UserAvatar name={row.name} className="chat-avatar" />
-          <strong style={{ color: nameColor(row.name, row.rating) }}>{row.name}</strong>
-          <code>{Math.round(row.rating)}</code>
-          <em>{row.wins}-{row.losses}</em>
+      {mineRow ? (
+        <button class="ranking-row mine" key={`pinned-${mineRow.name}`} onClick={() => openProfile(mineRow.name)}>
+          <span>#{mineRank}</span>
+          <UserAvatar name={mineRow.name} className="chat-avatar" />
+          <strong style={{ color: nameColor(mineRow.name, mineRow.rating) }}>{mineRow.name}</strong>
+          <code>{Math.round(mineRow.rating)}</code>
+          <em>{mineRow.wins}-{mineRow.losses}</em>
         </button>
-      ))}
+      ) : null}
+      {top.map((row) => {
+        const rank = rows.indexOf(row) + 1;
+        const isMine = normalizeName(row.name) === myKey;
+        return (
+          <button class={`ranking-row`} key={row.name} onClick={() => openProfile(row.name)}>
+            <span>#{rank}</span>
+            <UserAvatar name={row.name} className="chat-avatar" />
+            <strong style={{ color: nameColor(row.name, row.rating) }}>{row.name}</strong>
+            <code>{Math.round(row.rating)}</code>
+            <em>{row.wins}-{row.losses}</em>
+          </button>
+        );
+      })}
     </div>
   );
 };
@@ -2437,9 +2572,9 @@ const Problems = () => (
         <strong>{problem.solvedBy?.luoguName ?? (state.phase === "lobby" ? "hidden" : "unclaimed")}</strong>
         {state.phase === "arena" && isTeam(currentSeat()) && !blockedByBan() ? (
           <div class="problem-actions">
-            <button disabled={judgingProblems.has(`${problem.platform ?? "luogu"}:${problem.pid}`) || judgeCooldownRemaining() > 0} onClick={() => void judgeProblem(problem)}>
+            <button disabled={judgingProblems.has(`${problem.platform ?? "luogu"}:${problem.pid}`)} onClick={() => void judgeProblem(problem)}>
               {judgingProblems.has(`${problem.platform ?? "luogu"}:${problem.pid}`) ? <RefreshCw class="spin" size={13} /> : null}
-              {judgingProblems.has(`${problem.platform ?? "luogu"}:${problem.pid}`) ? "同步中" : judgeCooldownRemaining() > 0 ? `${judgeCooldownRemaining()}s` : "判题"}
+              {judgingProblems.has(`${problem.platform ?? "luogu"}:${problem.pid}`) ? "同步中" : "判题"}
             </button>
             <button disabled={replacingProblems.has(problem.pid) || Object.values(state.votes).some((vote) => vote.kind === "replace-problem" && vote.targetPid === problem.pid && vote.status === "open")} onClick={() => void replaceProblem(problem.pid)}>{replacingProblems.has(problem.pid) ? <RefreshCw class="spin" size={13} /> : null}{replacingProblems.has(problem.pid) ? "查找中" : "换题"}</button>
             <button onClick={() => void openVote("delete-problem", problem.pid)}>删题</button>
@@ -3284,7 +3419,7 @@ const joinRoom = async (room: RoomListing) => {
   joiningRoom = true;
   notify();
   try {
-    if (!(await leaveOrCloseCurrentMatchForNewRoom("进入新房间"))) return;
+    if (!(await leaveOrCloseCurrentMatchForNewRoom("加入房间"))) return;
     location.hash = `room=${room.roomId}&secret=${room.secret}`;
   } finally {
     joiningRoom = false;
@@ -3369,22 +3504,197 @@ const showFirstVisitRules = async () => {
   });
 };
 
-const judgeCooldownRemaining = (): number => {
+// ────────────────────────────────────────
+// 规则考试入站系统
+// ────────────────────────────────────────
+
+type ExamQuestion = {
+  id: string;
+  question: string;
+  options: string[];       // 4 个选项文本
+  correctIndex: number;    // 0-based 正确选项索引
+};
+
+const EXAM_PASSED_KEY = "vjudge-duel.exam-passed.v2";
+const EXAM_QUESTIONS_KEY = "vjudge-duel.exam-questions.v2";
+
+const EXAM_QUESTION_BANK: ExamQuestion[] = [
+  { id: "q01", question: "VJudge Duel 最多支持几个人同时对决？", options: ["2 人", "4 人", "6 人", "不限制"], correctIndex: 0 },
+  { id: "q02", question: "对决中是否可以中途退出？", options: ["可以随时退出", "不可以退出", "只能在准备阶段退出", "只能在对方同意后退出"], correctIndex: 0 },
+  { id: "q03", question: "Rating（评分）在对决中的作用是？", options: ["仅用于展示", "匹配对手和排名", "决定题目难度", "影响对决时间"], correctIndex: 1 },
+  { id: "q04", question: "如果检测到作弊行为，系统会如何处理？", options: ["警告一次", "扣 10 Rating", "Rating 清零并全局封禁", "仅本场判负"], correctIndex: 2 },
+  { id: "q05", question: "对决中是否可以使用外部工具或代码？", options: ["可以随意使用", "禁止使用任何外部工具", "可以使用但需提前声明", "只有管理员可以使用"], correctIndex: 1 },
+  { id: "q06", question: "VJudge Duel 支持的判题平台不包括哪个？", options: ["洛谷", "Codeforces", "AtCoder", "LeetCode"], correctIndex: 3 },
+  { id: "q07", question: "一道题目被一方解答后，另一方还能解答吗？", options: ["可以", "不可以", "只能在 5 分钟内解答", "需要投票决定"], correctIndex: 1 },
+  { id: "q08", question: "对决开始后，旁观者能否发送聊天消息？", options: ["可以发送公开消息", "可以发送队内消息", "不能发送任何消息", "只能在观战频道发言"], correctIndex: 2 },
+  { id: "q09", question: "如果有人在对决中辱骂他人，你应该？", options: ["骂回去", "无视继续比赛", "使用系统内的举报/屏蔽功能", "直接退出"], correctIndex: 2 },
+  { id: "q10", question: "VJudge Duel 的对决是否需要 VJudge 账号？", options: ["不需要", "必需 VJudge 账号", "仅创建房间需要", "仅参加对决需要"], correctIndex: 1 },
+  { id: "q11", question: "当所有玩家准备就绪后，对决会？", options: ["需要房主手动开始", "自动开始", "等待 30 秒后开始", "需要所有玩家再次确认"], correctIndex: 1 },
+  { id: "q12", question: "一道题目的得分由什么决定？", options: ["题目难度", "玩家等级", "房主指定", "随机分配"], correctIndex: 0 },
+  { id: "q13", question: "如果对题目有异议，可以怎么做？", options: ["直接跳过", "发起换题投票", "联系出题人", "退出对决"], correctIndex: 1 },
+  { id: "q14", question: "对决中是否可以观战其他人的比赛？", options: ["不可以", "只有管理员可以", "可以加入公开房间观战", "需要付费"], correctIndex: 2 },
+  { id: "q15", question: "Rating 系统的 K 因子受什么影响？", options: ["题目数量", "对决时长", "对决平均难度", "胜负次数"], correctIndex: 2 },
+  { id: "q16", question: "房主在对决开始后还能踢人吗？", options: ["可以随时踢人", "不能踢人", "只能踢观战者", "需要投票通过"], correctIndex: 1 },
+  { id: "q17", question: "VJudge Duel 中，失败的后果是什么？", options: ["账号封禁", "Rating 下降", "不能再次对决", "题目清空"], correctIndex: 1 },
+  { id: "q18", question: "以下哪项不属于 VJudge Duel 的题目来源？", options: ["洛谷公共题库", "Codeforces 题目", "AtCoder 题目", "自定义原创题目"], correctIndex: 3 },
+  { id: "q19", question: "对决结束后，房间会保留多久？", options: ["立即删除", "保留 1 小时", "保留 3 天", "永久保留"], correctIndex: 2 },
+  { id: "q20", question: "如果发现任何 bug 或建议，可以通过什么渠道反馈？", options: ["在聊天中直接提出", "联系管理员或提交工单", "自己修改代码", "到 GitHub 提 issue"], correctIndex: 1 },
+  { id: "q21", question: "低难度（橙色及以下）题目每天最多创建几场房间？", options: ["不限制", "5 场", "1 场", "3 场"], correctIndex: 2 },
+  { id: "q22", question: "在对决中是否允许多人使用同一账号？", options: ["允许", "不允许", "仅在练习模式下允许", "需要报备"], correctIndex: 1 },
+  { id: "q23", question: "对决中如果所有对方玩家都离线了，会发生什么？", options: ["比赛继续", "自动判胜", "比赛暂停", "需要等待对方回来"], correctIndex: 1 },
+  { id: "q24", question: "在主页中可以看到哪些信息？", options: ["仅排行榜", "仅公开房间", "公开房间和排行榜", "仅公告"], correctIndex: 2 },
+  { id: "q25", question: "换题投票需要多少通过率？", options: ["简单多数（>50%）", "全票通过", "三分之二以上", "房主决定"], correctIndex: 0 },
+];
+
+let examQuestions: ExamQuestion[] = [];
+let examCurrentIndex = 0;
+let examAnswers: Record<number, number> = {};
+let examStarted = false;
+let examSubmitted = false;
+
+function shuffleArray<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+const startExam = () => {
+  const shuffled = shuffleArray(EXAM_QUESTION_BANK).slice(0, 20);
+  examQuestions = shuffled;
+  examCurrentIndex = 0;
+  examAnswers = {};
+  examStarted = true;
+  examSubmitted = false;
   try {
-    const until = Number(localStorage.getItem(judgeCooldownKey()) || 0);
-    return Math.max(0, Math.ceil((until - Date.now()) / 1000));
-  } catch {
-    return 0;
+    localStorage.setItem(EXAM_QUESTIONS_KEY, JSON.stringify(shuffled.map((q) => q.id)));
+  } catch { /* ignore */ }
+};
+
+const isExamPassed = (): boolean => {
+  try { return localStorage.getItem(EXAM_PASSED_KEY) === "1"; } catch { return false; }
+};
+
+const isExamRequired = (): boolean => {
+  // 通过后不再需要考试；管理员豁免
+  if (isExamPassed() || isAdmin()) return false;
+  return true;
+};
+
+const handleExamSubmit = async () => {
+  examSubmitted = true;
+  notify();
+  // 检查答案
+  let allCorrect = true;
+  for (let i = 0; i < examQuestions.length; i += 1) {
+    const q = examQuestions[i];
+    if (examAnswers[i] !== q.correctIndex) {
+      allCorrect = false;
+      break;
+    }
+  }
+  if (allCorrect) {
+    try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
+    await Swal.fire({
+      title: "考试通过",
+      html: "<p>恭喜你通过了 VJudge Duel 规则考试！现在可以正常使用了。</p>",
+      icon: "success",
+      confirmButtonText: "开始使用",
+      customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
+    });
+    location.href = "/";
+  } else {
+    await Swal.fire({
+      title: "未通过",
+      html: "<p>有题目回答错误，请刷新后重新作答。</p><p style='color:var(--danger-text);font-size:13px'>提示：请仔细阅读规则后再答题。</p>",
+      icon: "error",
+      confirmButtonText: "重新考试",
+      customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
+    });
+    try { localStorage.removeItem(EXAM_QUESTIONS_KEY); } catch { /* ignore */ }
+    location.reload();
   }
 };
 
-const startJudgeCooldown = () => {
-  try {
-    localStorage.setItem(judgeCooldownKey(), String(Date.now() + 60_000));
-  } catch {
-    // Server-side rate limiting remains authoritative.
-  }
+const selectExamOption = (optionIndex: number) => {
+  examAnswers[examCurrentIndex] = optionIndex;
+  notify();
 };
+
+const ExamPage = () => {
+  if (examSubmitted) {
+    return (
+      <div class="exam-container">
+        <div class="exam-card">
+          <h1>VJudge Duel 规则考试</h1>
+          <p class="exam-status-text">正在检查答案…</p>
+        </div>
+      </div>
+    );
+  }
+  const q = examQuestions[examCurrentIndex];
+  if (!q) {
+    return (
+      <div class="exam-container">
+        <div class="exam-card">
+          <h1>VJudge Duel 规则考试</h1>
+          <p class="exam-status-text">题库加载失败，请刷新页面重试。</p>
+        </div>
+      </div>
+    );
+  }
+  const currentAnswer = examAnswers[examCurrentIndex];
+  const progress = `${examCurrentIndex + 1} / ${examQuestions.length}`;
+  const isLast = examCurrentIndex === examQuestions.length - 1;
+  const hasCurrent = currentAnswer !== undefined;
+
+  return (
+    <div class="exam-container">
+      <div class="exam-card">
+        <h1>VJudge Duel 规则考试</h1>
+        <p class="exam-subtitle">请认真作答，共 20 题，全部答对方可通过。</p>
+
+        <div class="exam-progress-row">
+          <span class="exam-progress">{progress}</span>
+          <a class="exam-rules-link" href="https://gengen.qzz.io/duel/rule" target="_blank" rel="noopener noreferrer">查看规则</a>
+        </div>
+
+        <div class="exam-question-box">
+          <p class="exam-question-text">{q.question}</p>
+          <div class="exam-options">
+            {q.options.map((opt, idx) => (
+              <button
+                key={idx}
+                class={`exam-option${currentAnswer === idx ? " selected" : ""}`}
+                onClick={() => selectExamOption(idx)}
+              >{opt}</button>
+            ))}
+          </div>
+        </div>
+
+        <div class="exam-nav">
+          <button
+            class="exam-nav-btn"
+            disabled={examCurrentIndex === 0}
+            onClick={() => { examCurrentIndex -= 1; notify(); }}
+          >上一题</button>
+          {isLast ? (
+            <button class="exam-submit-btn" onClick={() => void handleExamSubmit()}>提交</button>
+          ) : (
+            <button
+              class="exam-nav-btn"
+              onClick={() => { examCurrentIndex += 1; notify(); }}
+            >下一题</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── 考试系统结束 ──
 
 const vjudgeProblemUrl = (problem: Problem): string => {
   const source = problem.platform === "codeforces" ? "Codeforces" : problem.platform === "atcoder" ? "AtCoder" : "洛谷";
@@ -3598,7 +3908,9 @@ const nameColor = (name: string, rating = ratingRowFor(name).rating): string => 
 const playerRooms = (name: string): RoomListing[] =>
   sortedRooms().filter((room) => [...(room.redPlayers ?? []), ...(room.bluePlayers ?? [])].some((player) => normalizeName(player) === normalizeName(name)));
 const completedPlayerRooms = (name: string): RoomListing[] =>
-  playerRooms(name).filter((room) => room.status === "finished" && Boolean(room.winner) && !room.closedReason);
+  playerRooms(name).filter((room) => room.status === "finished"
+    && (Boolean(room.winner) || Boolean(room.cheatBanned))
+    && (!room.closedReason || Boolean(room.cheatBanned)));
 const achievementsFor = (name: string, row: RatingRow) => {
   const rows = ratingRows();
   const rank = rows.findIndex((item) => normalizeName(item.name) === normalizeName(name)) + 1;

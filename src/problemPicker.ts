@@ -156,7 +156,7 @@ const loadBank = async (platform: ProblemPlatform, progress: Progress): Promise<
   }
 
   progress(platform, 3, "正在连接");
-  const response = await fetch(sources[platform], { cache: "default", signal: AbortSignal.timeout(60_000) });
+  const response = await fetch(sources[platform], { cache: "default", signal: AbortSignal.timeout(300_000) });
   if (!response.ok) throw new Error(`${labels[platform]} 题库下载失败 (${response.status})`);
   const raw = await readWithProgress(response, (percent) => progress(platform, percent, `正在下载 ${percent}%`));
   progress(platform, 86, "正在解压与解析");

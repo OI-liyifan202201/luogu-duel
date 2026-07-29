@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject } from "cloudflare:workers";
-import { applyEvent, applyEvents, canStart, createInitialState, privateChatViolation } from "./domain";
+import { applyEvent, applyEvents, canStart, createInitialState, isTeam, privateChatViolation } from "./domain";
 import type { DuelEvent, FeedRecord, Problem, SignedEnvelope } from "./types";
 
 type Env = {
@@ -29,6 +29,10 @@ type RoomListing = {
   closedReason?: string;
   redPlayers?: string[];
   bluePlayers?: string[];
+  // 作弊封禁标记：比赛因检测到作弊而取消时，directory 据此执行 Rating 惩罚，
+  // 客户端据此在房间列表保留证据并标记为"已封禁"。
+  cheatBanned?: boolean;
+  cheaterName?: string;
 };
 
 type UserRecord = {
@@ -57,6 +61,14 @@ export class DuelRoom extends DurableObject<Env> {
   private cachedState = createInitialState("");
   private firstEvent: DuelEvent | null = null;
   private roomSecret: string | null = null;
+  // 比赛开始的服务器时间戳。detectCheatAndBan 用它而非客户端 startedAt 计算 elapsed，
+  // 避免"VJudge 提交时间(record.at) vs 客户端比赛开始时间"跨时钟比较在客户端时钟偏慢时
+  // 把 30s AC 算成 >=180s 从而漏判。服务端(Cloudflare)与 VJudge 均为 NTP 同步，偏差很小。
+  private matchStartServerMs: number | null = null;
+  // 作弊检测广播顺序锁：在 detectCheatAndBan 中，kick 必须先于 close 广播到客户端。
+  // 若 acceptEnvelope(kick) 内部触发了 auto-close，这里标记后由 detectCheatAndBan 统一广播。
+  private _inCheatDetection = false;
+  private _autoCloseEnvelope: SignedEnvelope | null = null;
   private listingsCache: Map<string, RoomListing> | null = null;
   private usersCache: Map<string, UserRecord> | null = null;
   private bannedUsersCache: Set<string> | null = null;
@@ -273,7 +285,11 @@ export class DuelRoom extends DurableObject<Env> {
     if (currentRoomId && currentRoomId !== event.roomId) return false;
     // Finished matches are immutable archives. Reject before SQLite persistence
     // so delayed retries cannot produce writes or directory broadcasts.
-    if (event.roomId !== "global" && this.cachedState.phase === "finished") return false;
+    // 例外：system 作弊封禁的 player.kicked / room.closed 允许穿透——
+    // 作弊 AC 同时是制胜 AC 时，updateWinner 已将 phase 翻为 finished，但封禁事件仍需执行。
+    if (event.roomId !== "global" && this.cachedState.phase === "finished"
+      && !(event.type === "player.kicked" && event.system)
+      && !(event.type === "room.closed" && event.system)) return false;
     if (event.type === "room.configured" && this.cachedState.problems.length > 0) {
       throw new Error("房间已经完成题目配置");
     }
@@ -362,6 +378,37 @@ export class DuelRoom extends DurableObject<Env> {
       ? applyEvent(this.cachedState.roomId === event.roomId ? this.cachedState : createInitialState(event.roomId), event)
       : applyEvents(event.roomId, this.eventsCache!.map((item) => item.event));
     this.writeSnapshot("events", this.eventsCache!);
+    // 作弊检测：比赛进行中，过快 AC（按题目难度）或同一人两次 AC 间隔过短，由 System 直接封禁。
+    // 用 previousPhase 而非当前 phase：若作弊 AC 同时是制胜 AC，applyEvent 内的 updateWinner
+    // 会先把 phase 翻成 finished，此时仍需检测并在下方 detectCheatAndBan 里覆盖胜利。
+    if (event.type === "judge.recordSeen") {
+      console.log(`[acceptEnvelope] judge.recordSeen: previousPhase=${previousPhase}, currentPhase=${this.cachedState.phase}, ` +
+        `recordStatus=${event.record.status}, recordAt=${event.record.at}, ` +
+        `stateStartedAt=${this.cachedState.startedAt}, willCallDetect=${event.roomId !== "global" && previousPhase === "arena"}`);
+    }
+    if (event.roomId !== "global" && event.type === "judge.recordSeen" && previousPhase === "arena") {
+      await this.detectCheatAndBan(event);
+    }
+    // 记录比赛开始的服务器时间，供 detectCheatAndBan 跨时钟稳健地计算 elapsed。
+    if (event.roomId !== "global" && event.type === "game.started" && this.cachedState.phase === "arena") {
+      this.matchStartServerMs = Date.now();
+    }
+    // 比赛进行中（arena）任意封禁 => 直接取消对决，由 directory 落地惩罚。
+    if (event.roomId !== "global" && event.type === "player.kicked" && this.cachedState.phase === "arena") {
+      const closeEnvelope = await systemCloseEnvelope(
+        this.cachedState.roomId,
+        this.cachedState.lamport + 1,
+        Date.now(),
+        "检测到作弊，对决取消"
+      );
+      const savedClose = await this.acceptEnvelope(closeEnvelope);
+      // 作弊检测流程中，kick 必须先于 close 广播。此处只暂存 close，由 detectCheatAndBan 在 kick 广播后统一发出。
+      if (savedClose && this._inCheatDetection) {
+        this._autoCloseEnvelope = closeEnvelope;
+      } else if (savedClose) {
+        this.broadcast({ type: "event", envelope: closeEnvelope });
+      }
+    }
     if (claimName && !isPlayingSeat(this.cachedState.players[event.actorId]?.team)) {
       await this.releaseActivePlayer(claimName, event.roomId);
     }
@@ -386,6 +433,75 @@ export class DuelRoom extends DurableObject<Env> {
       if (started) this.broadcast({ type: "event", envelope: startEnvelope });
     }
     return true;
+  }
+
+  private async detectCheatAndBan(event: Extract<DuelEvent, { type: "judge.recordSeen" }>): Promise<void> {
+    const record = event.record;
+    if (record.status !== "OK" || event.cheatExempt) {
+      if (record.status !== "OK") console.log(`[detectCheatAndBan] skip: status=${record.status}, cheater=${record.luoguName}, pid=${record.pid}`);
+      return;
+    }
+    const state = this.cachedState;
+    // 优先用服务器端记录的开赛时间，规避客户端时钟与 VJudge 时钟偏移导致的 elapsed 误算。
+    const startedAt = this.matchStartServerMs ?? state.startedAt ?? 0;
+    const player = Object.values(state.players).find((item) => normalizeName(item.luoguName) === normalizeName(record.luoguName));
+    if (!player || !isTeam(player.team)) {
+      console.log(`[detectCheatAndBan] skip: player=${!!player}, team=${player?.team}, cheater=${record.luoguName}`);
+      return;
+    }
+    const problem = state.problems.find((item) => item.pid.toLowerCase() === record.pid.toLowerCase());
+    const minMs = minSolveMsForDifficulty(problem?.difficulty);
+    const elapsed = record.at - startedAt;
+    const tooFastFromStart = minMs > 0 && elapsed >= 0 && elapsed < minMs;
+    console.log(`[detectCheatAndBan] cheater=${record.luoguName}, pid=${record.pid}, difficulty=${problem?.difficulty}, ` +
+      `recordAt=${record.at}, startedAt=${startedAt}, matchStartServerMs=${this.matchStartServerMs}, ` +
+      `elapsed=${elapsed}ms, minMs=${minMs}ms, tooFastFromStart=${tooFastFromStart}`);
+    let lastOkAt: number | null = null;
+    for (const feed of state.feed) {
+      // 同一玩家（不限队伍）的历史 AC 记录。
+      if (normalizeName(feed.luoguName) === normalizeName(record.luoguName) && feed.status === "OK" && feed.at < record.at) {
+        if (lastOkAt === null || feed.at > lastOkAt) lastOkAt = feed.at;
+      }
+    }
+    // 同一玩家两次 AC 间隔过短（按题目难度最短时间映射，不再固定 60s）即判定作弊。
+    const tooFastConsecutive = minMs > 0 && lastOkAt !== null && record.at - lastOkAt < minMs;
+    if (!tooFastFromStart && !tooFastConsecutive) {
+      console.log(`[detectCheatAndBan] NOT triggered: tooFastFromStart=${tooFastFromStart}, tooFastConsecutive=${tooFastConsecutive}, ` +
+        `lastOkAt=${lastOkAt}, consecutiveGap=${lastOkAt !== null ? record.at - lastOkAt : "N/A"}`);
+      return;
+    }
+    console.log(`[detectCheatAndBan] CHEAT DETECTED: cheater=${record.luoguName}, will ban now`);
+    const reason = "自动检测：判题速度异常（疑似作弊），Rating 已清零";
+    const kickEnvelope = await systemKickEnvelope(
+      this.cachedState.roomId,
+      this.cachedState.lamport + 1,
+      Date.now(),
+      player.id,
+      player.luoguName,
+      reason
+    );
+    // 广播顺序：必须先 kick 后 close。_inCheatDetection 阻止 auto-close 在 acceptEnvelope 内广播。
+    this._inCheatDetection = true;
+    this._autoCloseEnvelope = null;
+    const savedKick = await this.acceptEnvelope(kickEnvelope);
+    this._inCheatDetection = false;
+    // 1) 先广播 kick
+    if (savedKick) this.broadcast({ type: "event", envelope: kickEnvelope });
+    // 2) 再处理 close：优先用 auto-close 暂存的 envelope（非制胜 AC 路径），
+    //    否则走手动补发 close（制胜 AC / winning AC 路径）。
+    if (this._autoCloseEnvelope) {
+      this.broadcast({ type: "event", envelope: this._autoCloseEnvelope });
+      this._autoCloseEnvelope = null;
+    } else if (!this.cachedState.closed) {
+      const closeEnvelope = await systemCloseEnvelope(
+        this.cachedState.roomId,
+        this.cachedState.lamport + 1,
+        Date.now(),
+        "检测到作弊，对决取消"
+      );
+      const savedClose = await this.acceptEnvelope(closeEnvelope);
+      if (savedClose) this.broadcast({ type: "event", envelope: closeEnvelope });
+    }
   }
 
   async alarm(): Promise<void> {
@@ -485,6 +601,8 @@ export class DuelRoom extends DurableObject<Env> {
     const redPlayers = Object.values(state.players).filter((player) => player.team === "red").map((player) => player.luoguName);
     const bluePlayers = Object.values(state.players).filter((player) => player.team === "blue").map((player) => player.luoguName);
     const difficulties = problemDifficulties(state.problems);
+    // 作弊封禁信息从事件流推导：close 原因含"作弊"，且之前有 system 踢人事件。
+    const cheaterName = deriveCheatBannedName(this.eventsCache ?? this.listEvents());
     const listing: RoomListing = {
       roomId,
       secret: "",
@@ -501,7 +619,9 @@ export class DuelRoom extends DurableObject<Env> {
       maximumDifficulty: difficulties.length ? Math.max(...difficulties) : undefined,
       closedReason: state.closed?.reason,
       redPlayers,
-      bluePlayers
+      bluePlayers,
+      cheatBanned: cheaterName ? true : undefined,
+      cheaterName: cheaterName ?? undefined
     };
     const attachmentSecret = await this.readSecret();
     if (attachmentSecret) listing.secret = attachmentSecret;
@@ -534,7 +654,7 @@ export class DuelRoom extends DurableObject<Env> {
         Date.now()
       );
       this.registerListingUsers(body.listing);
-      this.applyFinishedListingResult(body.listing);
+      await this.applyFinishedListingResult(body.listing);
       this.listingsCache!.set(body.listing.roomId, body.listing);
       await this.pruneDirectory();
       this.writeSnapshot("directory", [...this.listingsCache!.values()]);
@@ -809,13 +929,25 @@ export class DuelRoom extends DurableObject<Env> {
     }
   }
 
-  private applyFinishedListingResult(listing: RoomListing): void {
-    if (listing.rated === false || listing.status !== "finished" || listing.winner === "draw" || !listing.winner) return;
+  private async applyFinishedListingResult(listing: RoomListing): Promise<void> {
+    if (listing.status !== "finished") return;
+    this.hydrateProcessedResults();
+    if (this.processedResultsCache!.has(listing.roomId)) return;
+
+    // 作弊封禁：作弊者 Rating 清零，其余参赛者每人 +10 Rating，并对作弊者执行全局封禁。
+    if (listing.cheatBanned && listing.cheaterName) {
+      this.applyCheatResult(listing);
+      this.ctx.storage.sql.exec("INSERT INTO processed_results (room_id, processed_at) VALUES (?, ?)", listing.roomId, Date.now());
+      this.processedResultsCache!.add(listing.roomId);
+      this.writeSnapshot("processed-results", [...this.processedResultsCache!]);
+      await this.enforceGlobalCheatBan(listing.cheaterName);
+      return;
+    }
+
+    if (listing.rated === false || listing.winner === "draw" || !listing.winner) return;
     const red = dedupeNames(listing.redPlayers ?? []);
     const blue = dedupeNames(listing.bluePlayers ?? []);
     if (!red.length || !blue.length) return;
-    this.hydrateProcessedResults();
-    if (this.processedResultsCache!.has(listing.roomId)) return;
 
     const redRows = red.map((name) => this.upsertUser({ name }));
     const blueRows = blue.map((name) => this.upsertUser({ name }));
@@ -831,6 +963,37 @@ export class DuelRoom extends DurableObject<Env> {
     this.ctx.storage.sql.exec("INSERT INTO processed_results (room_id, processed_at) VALUES (?, ?)", listing.roomId, Date.now());
     this.processedResultsCache!.add(listing.roomId);
     this.writeSnapshot("processed-results", [...this.processedResultsCache!]);
+  }
+
+  private applyCheatResult(listing: RoomListing): void {
+    const cheaterName = (listing.cheaterName ?? "").trim();
+    if (!cheaterName) return;
+    const cheaterKey = normalizeName(cheaterName);
+    // 作弊者 Rating 重置为 0（必须在写入 banned_users 之前完成，writeUser 会拒绝已封禁用户）。
+    this.writeUser(applyCheatPenalty(this.upsertUser({ name: cheaterName })));
+    const others = dedupeNames([...(listing.redPlayers ?? []), ...(listing.bluePlayers ?? [])])
+      .filter((name) => normalizeName(name) !== cheaterKey);
+    for (const name of others) {
+      this.writeUser(applyCheatCompensation(this.upsertUser({ name })));
+    }
+  }
+
+  // 对作弊者发布全局（global 房间）系统封禁事件，使其返回主界面时持续看到封禁遮罩，
+  // 并阻止其再次创建/加入房间。rating 清零已在 applyCheatResult 中完成。
+  private async enforceGlobalCheatBan(cheaterName: string): Promise<void> {
+    try {
+      const reason = "作弊检测：判题速度异常，Rating 已清零";
+      const now = Date.now();
+      const envelope = await systemKickEnvelope("global", now, now, `name:${normalizeName(cheaterName)}`, cheaterName, reason);
+      const response = await this.env.DUEL_ROOM.getByName("global:public-lobby").fetch("https://duel.internal/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ envelope })
+      });
+      if (!response.ok) throw new Error(`global ban returned ${response.status}`);
+    } catch {
+      // Rating 惩罚已落地；全局封禁失败仅影响主页遮罩，不影响本场清理。
+    }
   }
 
   private readUser(name: string): UserRecord | null {
@@ -1184,7 +1347,7 @@ const proxyProblemBank = async (request: Request, source: ProblemBankSource, ctx
     const upstream = await fetchExternalWith403Fallback(config.url, {
       headers: { accept: config.accept },
       cf: { cacheEverything: true, cacheTtl: problemBankCacheSeconds },
-      signal: AbortSignal.timeout(60_000)
+      signal: AbortSignal.timeout(300_000)
     });
     if (!upstream.ok) return jsonError(`${source} problem bank upstream returned ${upstream.status}`, 502);
 
@@ -1249,6 +1412,8 @@ const fetchVJudgeStatus = async (requestUrl: URL, request: Request, env: Env): P
       if ((Number.isFinite(total) && start >= total) || (!Number.isFinite(total) && pageRecords.length < pageSize)) break;
     }
     const seen = new Set<string>();
+    let filteredBySinceCount = 0;
+    let passedCount = 0;
     const data = records.flatMap((record) => {
       const userId = typeof record.userId === "number" || typeof record.userId === "string" ? record.userId : undefined;
       const userName = typeof record.userName === "string" ? record.userName : "";
@@ -1257,10 +1422,16 @@ const fetchVJudgeStatus = async (requestUrl: URL, request: Request, env: Env): P
       const time = rawTime > 0 && rawTime < 10_000_000_000 ? rawTime * 1000 : rawTime;
       const runId = typeof record.runId === "number" || typeof record.runId === "string" ? record.runId : "";
       const key = `${runId || userId}:${time}`;
-      if (userId === undefined || !status || !Number.isFinite(time) || time < since || seen.has(key)) return [];
+      if (userId === undefined || !status || !Number.isFinite(time) || time < since || seen.has(key)) {
+        if (time < since) filteredBySinceCount++;
+        return [];
+      }
+      passedCount++;
       seen.add(key);
       return [{ userId, userName, status, time, runId }];
     });
+    if (since > 0) console.log(`[fetchVJudgeStatus] since=${since} (${new Date(since).toISOString()}), ` +
+      `totalFetched=${records.length}, passed=${passedCount}, filteredBySince=${filteredBySinceCount}`);
     return Response.json({ data }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "VJudge status request failed", 502);
@@ -1439,6 +1610,19 @@ const isLowDifficultyRoom = (problems: Problem[]): boolean => {
   return difficulties.length > 0 && Math.min(...difficulties) <= 2;
 };
 
+// 按题目难度色决定开赛后最短可 AC 时间，用于作弊检测：
+// 红(1) 无限制；橙黄(2-3) 60s；绿(4) 3min；青蓝(5-6) 5min；紫黑(7-8) 10min。
+const minSolveMsForDifficulty = (difficulty: number | undefined): number => {
+  const level = Number(difficulty);
+  // 未知难度（如自定义题目）按橙黄档 60s 兜底，避免完全无检测；红题(<=1)不设下限。
+  if (!Number.isFinite(level)) return 60_000;
+  if (level <= 1) return 0;
+  if (level <= 3) return 60_000;
+  if (level <= 4) return 3 * 60_000;
+  if (level <= 6) return 5 * 60_000;
+  return 10 * 60_000;
+};
+
 const chinaDayKey = (timestamp: number): string =>
   new Date(timestamp + 8 * 60 * 60_000).toISOString().slice(0, 10);
 
@@ -1454,6 +1638,36 @@ const applyRatingDelta = (user: UserRecord, delta: number, won: boolean): UserRe
   ratingHistory: [...(user.ratingHistory?.length ? user.ratingHistory : [{ at: user.updatedAt, rating: user.rating }]), { at: Date.now(), rating: Math.max(0, user.rating + delta) }].slice(-100),
   updatedAt: Date.now()
 });
+
+// 作弊惩罚：Rating 直接清零（不改动胜负场次，比赛已取消）。
+const applyCheatPenalty = (user: UserRecord): UserRecord => ({
+  ...user,
+  rating: 0,
+  ratingHistory: [...(user.ratingHistory?.length ? user.ratingHistory : [{ at: user.updatedAt, rating: user.rating }]), { at: Date.now(), rating: 0 }].slice(-100),
+  updatedAt: Date.now()
+});
+
+// 作弊补偿：其余参赛者每人 +10 Rating（不计入胜负场次）。
+const applyCheatCompensation = (user: UserRecord): UserRecord => ({
+  ...user,
+  rating: user.rating + 10,
+  ratingHistory: [...(user.ratingHistory?.length ? user.ratingHistory : [{ at: user.updatedAt, rating: user.rating }]), { at: Date.now(), rating: user.rating + 10 }].slice(-100),
+  updatedAt: Date.now()
+});
+
+// 从事件流推导作弊者名称：room.closed 原因含"作弊"，取其之前最后一条 system 踢人事件的 targetName。
+const deriveCheatBannedName = (envelopes: SignedEnvelope[]): string | null => {
+  const closeEvent = envelopes.find((item) => item.event.type === "room.closed" && (item.event.reason ?? "").includes("作弊"))?.event as Extract<DuelEvent, { type: "room.closed" }> | undefined;
+  if (!closeEvent) return null;
+  let cheater: string | null = null;
+  for (const item of envelopes) {
+    const event = item.event;
+    if (event.type === "player.kicked" && event.system && event.issuedAt <= closeEvent.issuedAt) {
+      cheater = event.targetName ?? cheater;
+    }
+  }
+  return cheater;
+};
 
 const compareEnvelopes = (a: SignedEnvelope, b: SignedEnvelope): number =>
   a.event.lamport - b.event.lamport || a.event.issuedAt - b.event.issuedAt || a.event.id.localeCompare(b.event.id);
@@ -1491,12 +1705,13 @@ const systemJudgeEnvelope = async (roomId: string, lamport: number, issuedAt: nu
     lamport,
     issuedAt,
     record
+    // 不设 cheatExempt —— Manual Claim（包括 VJudge++ 插件调用）同样走全套作弊检测。
   };
   const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, textBytes(stableStringify(event)));
   return { publicKey, event, signature: btoa(String.fromCharCode(...new Uint8Array(signature))) };
 };
 
-const systemCloseEnvelope = async (roomId: string, lamport: number, issuedAt: number): Promise<SignedEnvelope> => {
+const systemCloseEnvelope = async (roomId: string, lamport: number, issuedAt: number, reason = "已自动关闭", actorName = "gcend"): Promise<SignedEnvelope> => {
   const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
   const actorId = await keyId(publicKey);
@@ -1507,8 +1722,30 @@ const systemCloseEnvelope = async (roomId: string, lamport: number, issuedAt: nu
     id: crypto.randomUUID(),
     lamport,
     issuedAt,
-    actorName: "gcend",
-    reason: "已自动关闭"
+    actorName,
+    reason,
+    system: true
+  };
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, textBytes(stableStringify(event)));
+  return { publicKey, event, signature: btoa(String.fromCharCode(...new Uint8Array(signature))) };
+};
+
+const systemKickEnvelope = async (roomId: string, lamport: number, issuedAt: number, targetId: string, targetName: string, reason: string): Promise<SignedEnvelope> => {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const actorId = await keyId(publicKey);
+  const event: DuelEvent = {
+    type: "player.kicked",
+    roomId,
+    actorId,
+    id: crypto.randomUUID(),
+    lamport,
+    issuedAt,
+    targetId,
+    targetName,
+    reason,
+    system: true,
+    by: "System"
   };
   const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, textBytes(stableStringify(event)));
   return { publicKey, event, signature: btoa(String.fromCharCode(...new Uint8Array(signature))) };

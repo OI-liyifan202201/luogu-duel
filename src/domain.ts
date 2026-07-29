@@ -114,7 +114,12 @@ export const applyEvents = (roomId: string, events: DuelEvent[]): DuelState =>
 
 export const applyEvent = (state: DuelState, event: DuelEvent): DuelState => {
   // A completed room is an archive. Ignore late or retried room events during replay.
-  if (state.roomId !== "global" && state.phase === "finished") return state;
+  // 例外：system 作弊封禁的 room.closed / player.kicked 需要穿透——
+  // 当作弊 AC 同时是制胜 AC 时，updateWinner 已将 phase 翻为 finished，
+  // 但 system 封禁事件（踢人 + 关房）仍需覆盖胜利并执行惩罚。
+  if (state.roomId !== "global" && state.phase === "finished"
+    && !(event.type === "room.closed" && event.system)
+    && !(event.type === "player.kicked" && event.system)) return state;
   const next = cloneState(state);
   next.lamport = Math.max(next.lamport, event.lamport);
 
@@ -165,10 +170,10 @@ export const applyEvent = (state: DuelState, event: DuelEvent): DuelState => {
       claimIfAccepted(next, event.record, event.id);
       break;
     case "room.closed":
-      closeRoom(next, event.actorId, event.actorName, event.reason, event.issuedAt);
+      closeRoom(next, event);
       break;
     case "player.kicked":
-      kickPlayer(next, event.actorId, event.targetId, event.targetName, event.reason, event.issuedAt);
+      kickPlayer(next, event);
       break;
     case "player.unkicked":
       unkickPlayer(next, event.actorId, event.targetName, event.issuedAt);
@@ -435,21 +440,44 @@ const pushChat = (state: DuelState, event: Extract<DuelEvent, { type: "chat.sent
   });
 };
 
-const closeRoom = (state: DuelState, actorId: string, actorName: string, reason: string, at: number) => {
-  if (!canCloseRoom(state, actorId, actorName) || state.phase === "finished") return;
+const closeRoom = (state: DuelState, event: Extract<DuelEvent, { type: "room.closed" }>): void => {
+  if (!event.system && !canCloseRoom(state, event.actorId, event.actorName)) return;
+  if (state.phase === "finished" && !event.system) return;
   state.phase = "finished";
-  state.endedAt = at;
-  state.closed = { reason: reason.trim() || "房间已关闭", by: actorName, at };
-  pushSystem(state, `房间已关闭：${state.closed.reason}`, at);
+  state.endedAt = event.issuedAt;
+  state.closed = { reason: event.reason.trim() || "房间已关闭", by: event.actorName, at: event.issuedAt };
+  // system 作弊封禁覆盖已结束比赛：清除作弊 AC 产生的胜利，使该房间按"作弊取消"处理。
+  if (event.system) state.winner = undefined;
+  pushSystem(state, `房间已关闭：${state.closed.reason}`, event.issuedAt);
 };
 
-const kickPlayer = (state: DuelState, actorId: string, targetId: string, targetName: string | undefined, reason: string, at: number) => {
-  const actor = state.players[actorId];
+const kickPlayer = (state: DuelState, event: Extract<DuelEvent, { type: "player.kicked" }>): void => {
+  const { actorId, targetId, targetName, reason, issuedAt: at, system, by } = event;
   const resolvedTargetId = state.players[targetId]
     ? targetId
     : Object.values(state.players).find((player) => normalizeName(player.luoguName) === normalizeName(targetName || ""))?.id;
   const target = resolvedTargetId ? state.players[resolvedTargetId] : undefined;
   const finalTargetName = target?.luoguName || targetName || targetId;
+  if (system) {
+    if (state.hostId === resolvedTargetId) return;
+    const record: ModerationRecord = {
+      reason: `${reason.trim() || "系统封禁"}`,
+      by: by ?? "System",
+      at
+    };
+    state.kicked[resolvedTargetId ?? targetId] = record;
+    state.banned[normalizeName(finalTargetName)] = record;
+    if (target) {
+      target.team = "spectator";
+      target.ready = false;
+      target.online = false;
+      delete state.muted[target.id];
+    }
+    delete state.muted[`name:${normalizeName(finalTargetName)}`];
+    pushSystem(state, `${finalTargetName} 已被 ${by ?? "System"} 封禁：${record.reason}`, at);
+    return;
+  }
+  const actor = state.players[actorId];
   if (!actor || state.hostId === resolvedTargetId || isAdminName(finalTargetName)) return;
   const lobbyKick = state.phase === "lobby" && (state.hostId === actorId || isAdminName(actor.luoguName));
   if (!lobbyKick && !isAdminName(actor.luoguName)) return;
