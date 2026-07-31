@@ -468,7 +468,7 @@ const kickPlayer = (state: DuelState, event: Extract<DuelEvent, { type: "player.
     state.kicked[resolvedTargetId ?? targetId] = record;
     state.banned[normalizeName(finalTargetName)] = record;
     if (target) {
-      target.team = "spectator";
+      // 自动封禁：保留其原有座位（不强制移至观赛席），仅取消就绪/在线与禁言状态。
       target.ready = false;
       target.online = false;
       delete state.muted[target.id];

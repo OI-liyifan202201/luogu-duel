@@ -1222,10 +1222,15 @@ const markCheatNotified = (roomId: string, role: "cheater" | "participant") => {
   persistCheatNotified();
 };
 
+// 比赛中的封禁者先看到红底 SweetAlert，关闭后再显示封禁遮罩（避免两个弹窗同时出现）。
+let cheatSwalOpen = false;
+
 const showCheatPopup = async (role: "cheater" | "participant", cheaterName: string, roomId: string): Promise<void> => {
   if (isCheatNotified(roomId, role)) return;
   markCheatNotified(roomId, role);
   if (role === "cheater") {
+    cheatSwalOpen = true;
+    notify();
     await Swal.fire({
       title: "因作弊被封禁",
       html: "检测到作弊，你的 Rating 已清零，且已被全局封禁。",
@@ -1235,6 +1240,8 @@ const showCheatPopup = async (role: "cheater" | "participant", cheaterName: stri
       confirmButtonText: "我知道了",
       customClass: { popup: "duel-swal cheat-swal", confirmButton: "duel-swal-confirm cheat-swal-confirm" }
     });
+    cheatSwalOpen = false;
+    notify();
     return;
   }
   await Swal.fire({
@@ -2561,7 +2568,11 @@ const Problems = () => (
           <span>{problem.score} pts</span>
         </div>
         {problem.difficulty ? <DifficultyBadge level={problem.difficulty} /> : <em>自定义</em>}
-        <strong>{problem.solvedBy?.luoguName ?? (state.phase === "lobby" ? "hidden" : "unclaimed")}</strong>
+        {problem.solvedBy ? (
+          <strong>{problem.solvedBy.luoguName}</strong>
+        ) : state.phase === "lobby" ? (
+          <strong class="problem-solver-hidden">hidden</strong>
+        ) : null}
         {state.phase === "arena" && isTeam(currentSeat()) && !blockedByBan() ? (
           <div class="problem-actions">
             <button disabled={judgingProblems.has(`${problem.platform ?? "luogu"}:${problem.pid}`)} onClick={() => void judgeProblem(problem)}>
@@ -2635,7 +2646,7 @@ const ChatLine = ({ item }: { item: ChatStreamItem }) => {
     return (
       <p class="chat-line system">
         <span class="chat-avatar">#</span>
-        <span>SYS</span>
+        <span>SYS / {formatClock(item.at)}</span>
         <RichText text={item.text} className="chat-text" />
       </p>
     );
@@ -2652,10 +2663,11 @@ const ChatLine = ({ item }: { item: ChatStreamItem }) => {
   }
   const chat = item.chat;
   const mine = chat.actorId === identity.id || isOwnName(chat.luoguName);
+  const showTime = mode === "home" || state.phase === "arena";
   return (
     <p class={`chat-line bubble ${mine ? "mine" : "theirs"} ${chat.visibility === "team" ? "private" : ""}`}>
       <UserAvatar name={chat.luoguName} className="chat-avatar" />
-      <button type="button" class="chat-name" title={`点击 @${chat.luoguName}`} style={{ color: nameColor(chat.luoguName) }} onClick={() => insertMention(chat.luoguName)}>{chat.visibility === "team" ? "TEAM / " : ""}{chat.luoguName}</button>
+      <button type="button" class="chat-name" title={`点击 @${chat.luoguName}`} style={{ color: nameColor(chat.luoguName) }} onClick={() => insertMention(chat.luoguName)}>{chat.visibility === "team" ? "TEAM / " : ""}{chat.luoguName}{showTime ? <span class="chat-time">{formatClock(chat.at)}</span> : null}</button>
       <RichText text={chat.text} className="chat-text" />
     </p>
   );
@@ -2873,6 +2885,8 @@ const Votes = () => {
 const BanOverlay = () => {
   const record = bannedRecord();
   if (!record) return null;
+  // 红底 SweetAlert 展示期间暂不显示封禁遮罩，关闭后再显示
+  if (cheatSwalOpen) return null;
   return (
     <div class="ban-overlay">
       <div>

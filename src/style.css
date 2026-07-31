@@ -2214,9 +2214,12 @@ img.chat-avatar {
   animation: line-in 180ms ease both;
 }
 
-.chat-line > span:nth-child(2),
-.chat-name {
+.chat-line > span:nth-child(2) {
   display: contents;
+  color: var(--muted);
+  font: 800 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chat-name {
   color: var(--muted);
   font: 800 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
@@ -2293,6 +2296,20 @@ img.chat-avatar {
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.chat-time {
+  margin-left: 6px;
+  font: 700 10px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.problem-solver-hidden {
+  color: var(--muted);
+  opacity: 0.6;
+  font-weight: 700;
+  font-size: 12px;
 }
 
 .chat-log .private {

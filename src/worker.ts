@@ -449,6 +449,11 @@ export class DuelRoom extends DurableObject<Env> {
       console.log(`[detectCheatAndBan] skip: player=${!!player}, team=${player?.team}, cheater=${record.luoguName}`);
       return;
     }
+    // 同一道题已记录过 OK（重复提交 / 双路径重复 claim），跳过重复检测，避免误封。
+    if (state.feed.some((feed) => feed.pid === record.pid && normalizeName(feed.luoguName) === normalizeName(record.luoguName) && feed.status === "OK" && feed.at !== record.at)) {
+      console.log(`[detectCheatAndBan] skip duplicate claim: pid=${record.pid}, cheater=${record.luoguName}`);
+      return;
+    }
     const problem = state.problems.find((item) => item.pid.toLowerCase() === record.pid.toLowerCase());
     const minMs = minSolveMsForDifficulty(problem?.difficulty);
     const elapsed = record.at - startedAt;
@@ -458,8 +463,9 @@ export class DuelRoom extends DurableObject<Env> {
       `elapsed=${elapsed}ms, minMs=${minMs}ms, tooFastFromStart=${tooFastFromStart}`);
     let lastOkAt: number | null = null;
     for (const feed of state.feed) {
-      // 同一玩家（不限队伍）的历史 AC 记录。
-      if (normalizeName(feed.luoguName) === normalizeName(record.luoguName) && feed.status === "OK" && feed.at < record.at) {
+      // 同一玩家（不限队伍）、不同题目 的历史 AC 记录。
+      // 同一道题重复提交 / 双路径重复 claim 不计入"连续 AC"，否则会被误判为作弊。
+      if (feed.pid !== record.pid && normalizeName(feed.luoguName) === normalizeName(record.luoguName) && feed.status === "OK" && feed.at < record.at) {
         if (lastOkAt === null || feed.at > lastOkAt) lastOkAt = feed.at;
       }
     }
