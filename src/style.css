@@ -3317,148 +3317,270 @@ body .cheat-swal-confirm.duel-swal-confirm:hover {
   }
 }
 
-/* ── 规则考试页面 ── */
-.exam-container {
-  display: flex;
+/* ── 规则考试页面 ──
+   与主站共用同一套设计 token 与面板组件（.command-panel / .panel / .section-head /
+   .panel-title / .home-announcement），此处只补充考试页特有的布局与控件。 */
+
+.exam-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(430px, 1.45fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 18px;
+  padding: 18px;
+  min-height: calc(100vh - 53px);
+  height: calc(100vh - 53px);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* 判定中 / 题库缺失等单面板状态 */
+.exam-grid-single {
+  grid-template-columns: minmax(0, min(560px, 100%));
+  align-content: start;
   justify-content: center;
-  align-items: center;
-  min-height: 100vh;
-  padding: 24px;
-  background: var(--bg);
 }
 
-.exam-card {
-  width: 100%;
-  max-width: 640px;
-  padding: 40px 36px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 16px;
+.exam-grid-single .exam-brief {
+  height: max-content;
 }
 
-.exam-card h1 {
-  margin: 0 0 4px;
-  font-size: 24px;
+.exam-notice {
+  margin-bottom: 0;
+}
+
+.exam-rule-list {
+  margin: 0;
+  padding-left: 17px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.exam-rule-list b {
   color: var(--text);
 }
 
-.exam-subtitle {
-  margin: 0 0 20px;
-  color: var(--muted);
-  font-size: 14px;
+/* 作答进度 */
+.exam-progress-block {
+  margin-top: 13px;
 }
 
-.exam-progress-row {
+.exam-progress-head {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 7px;
 }
 
-.exam-progress {
-  font-weight: 800;
-  font-size: 15px;
+.exam-progress-head span {
+  color: var(--green);
+  font: 900 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.exam-progress-head strong {
+  color: var(--text);
+  font: 800 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.exam-progress-bar {
+  overflow: hidden;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line-soft);
+}
+
+.exam-progress-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+  transition: width 280ms cubic-bezier(.16, 1, .3, 1);
+}
+
+/* 题号跳转点阵 */
+.exam-dots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.exam-dot {
+  min-height: 32px;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.exam-dot:hover {
+  border-color: color-mix(in srgb, var(--green) 55%, transparent);
   color: var(--green);
 }
 
-.exam-rules-link {
-  font-size: 13px;
-  color: var(--link);
-  text-decoration: underline;
+.exam-dot.done {
+  border-color: color-mix(in srgb, var(--green) 42%, transparent);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  color: var(--green);
 }
 
-.exam-question-box {
-  padding: 20px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  margin-bottom: 20px;
+.exam-dot.current {
+  border-color: var(--green);
+  color: var(--green);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 22%, transparent);
+}
+
+/* 题面 */
+.exam-question-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+}
+
+.exam-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 1px;
 }
 
 .exam-question-text {
-  font-size: 16px;
-  font-weight: 600;
+  margin: 2px 0 14px;
   color: var(--text);
-  margin: 0 0 16px;
-  line-height: 1.6;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .exam-options {
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: 8px;
 }
 
 .exam-option {
-  padding: 12px 16px;
-  text-align: left;
-  font-size: 14px;
-  border: 1.5px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--panel-radius);
+  background: transparent;
   color: var(--text);
-  cursor: pointer;
-  transition: border-color .16s ease, background .16s ease;
+  text-align: left;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
 }
 
 .exam-option:hover {
-  border-color: var(--green);
-  background: color-mix(in srgb, var(--green) 6%, transparent);
+  border-color: color-mix(in srgb, var(--green) 55%, transparent);
+  background: color-mix(in srgb, var(--green) 7%, transparent);
+  transform: translateY(-1px);
 }
 
 .exam-option.selected {
   border-color: var(--green);
-  background: color-mix(in srgb, var(--green) 14%, transparent);
-  color: var(--green);
-  font-weight: 600;
+  background: color-mix(in srgb, var(--green) 13%, transparent);
 }
 
+.exam-option > svg {
+  color: var(--green);
+}
+
+.exam-option-key {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.exam-option.selected .exam-option-key {
+  border-color: var(--green);
+  background: var(--green);
+  color: var(--panel);
+}
+
+.exam-option-text {
+  min-width: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.exam-option.selected .exam-option-text {
+  color: var(--green);
+  font-weight: 700;
+}
+
+/* 底部导航 */
 .exam-nav {
   display: flex;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
 }
 
-.exam-nav-btn {
+.exam-nav-hint {
   flex: 1;
-  padding: 12px 0;
-  border: 1.5px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: border-color .16s ease, background .16s ease;
-}
-
-.exam-nav-btn:hover:not(:disabled) {
-  border-color: var(--green);
-}
-
-.exam-nav-btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-.exam-submit-btn {
-  flex: 1;
-  padding: 12px 0;
-  border: none;
-  border-radius: 10px;
-  background: var(--green);
-  color: #fff;
-  font-size: 15px;
-  font-weight: 800;
-  cursor: pointer;
-  transition: opacity .14s ease;
-}
-
-.exam-submit-btn:hover {
-  opacity: 0.88;
-}
-
-.exam-status-text {
+  min-width: 0;
+  text-align: center;
   color: var(--muted);
-  font-size: 14px;
-  margin: 20px 0 0;
+  font-size: 12px;
+}
+
+@media (max-width: 1180px) {
+  .exam-grid {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: calc(100vh - 52px);
+    overflow: visible;
+  }
+
+  .exam-grid-single {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .exam-body {
+    overflow-y: visible;
+  }
+}
+
+@media (max-width: 720px) {
+  .exam-grid {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .exam-question-text {
+    font-size: 16px;
+  }
+
+  .exam-nav {
+    flex-wrap: wrap;
+  }
+
+  .exam-nav-hint {
+    order: -1;
+    flex: none;
+    width: 100%;
+    text-align: left;
+  }
+
+  .exam-nav > button {
+    flex: 1;
+    justify-content: center;
+  }
 }

@@ -413,24 +413,26 @@ const boot = async () => {
   identity = await renameIdentity(identity, vjudgeSession.username);
   bootPhase = "ready";
   await registerCurrentUser();
+
+  if (isExamRequired() && !isExamPath()) {
+    location.replace("/exam");
+    return; 
+  }
+
   await enterFromHash();
   finishBootScreen();
-  // scheduleFirstVisitRules(); // 已移除首次规则弹窗
-  // TODO: 考试系统上线后取消注释，强制未通过考试的用户跳转到 /exam
-  // if (mode !== "exam" && isExamRequired() && location.pathname !== "/exam") {
-  //   location.replace("/exam");
-  //   return;
-  // }
 };
 
 const enterFromHash = async () => {
   // 规则考试页面
-  if (location.pathname === "/exam" || location.pathname.startsWith("/exam?")) {
+  if (isExamPath()) {
     mode = "exam";
     roomId = "global";
     roomSecret = "public-lobby";
     closeSocket();
     if (!examStarted) startExam();
+    // 顶栏状态条与主站共用，此处覆盖掉启动阶段残留的文案。
+    setStatus(isExamPassed() ? "已通过规则考试" : "请完成规则考试");
     notify();
     return;
   }
@@ -1888,11 +1890,9 @@ const App = () => {
   }
   return (
     <>
-      {mode === "exam" ? <ExamPage /> : (
-      <Shell title="VJudge Duel" subtitle={mode === "profile" ? "user" : mode === "admin" ? "admin" : mode === "home" ? "control room" : `${roomId} / ${state.phase}`}>
-        {mode === "profile" ? <ProfilePage /> : mode === "admin" ? <AdminPage /> : mode === "home" ? <Home /> : <Room />}
+      <Shell title="VJudge Duel" subtitle={mode === "exam" ? "rule exam" : mode === "profile" ? "user" : mode === "admin" ? "admin" : mode === "home" ? "control room" : `${roomId} / ${state.phase}`}>
+        {mode === "exam" ? <ExamPage /> : mode === "profile" ? <ProfilePage /> : mode === "admin" ? <AdminPage /> : mode === "home" ? <Home /> : <Room />}
       </Shell>
-      )}
       <ToastStack />
       <BanOverlay />
       {bootOverlay}
@@ -1904,6 +1904,13 @@ const Shell = ({ title, subtitle, children }: { title: string; subtitle: string;
   <div class="app-shell">
     <header class="topbar">
       <button class="brand" onClick={() => {
+        if (mode === "exam") {
+          // 考试是入站门槛：未通过时不放行，否则跳回主页也会被 boot 立刻拦截回来，
+          // 白白经历一次整页重载。已通过（手动回来复习）则正常返回。
+          if (isExamPassed()) location.href = "/";
+          else setStatus("请先完成规则考试", "error");
+          return;
+        }
         if (mode === "profile") location.href = "/";
         else if (mode === "room" && currentSeat() === "spectator") void leaveRoom();
         else location.hash = "";
@@ -1922,7 +1929,12 @@ const Shell = ({ title, subtitle, children }: { title: string; subtitle: string;
         </button>
         {bootPhase === "ready" ? (
           <>
-            {isAdmin() ? <button class="ghost" onClick={() => { draft.adminSearch = mode === "profile" ? (profileUserName || "") : ""; location.hash = mode === "admin" ? "" : "admin=1"; }}><Shield size={15} />{mode === "admin" ? "主页" : "管理"}</button> : null}
+            {isAdmin() ? <button class="ghost" onClick={() => {
+              draft.adminSearch = mode === "profile" ? (profileUserName || "") : "";
+              // 考试页在 /exam 路径下，改 hash 不会离开该路由，必须整页跳转。
+              if (mode === "exam") location.href = "/#admin=1";
+              else location.hash = mode === "admin" ? "" : "admin=1";
+            }}><Shield size={15} />{mode === "admin" ? "主页" : "管理"}</button> : null}
             <button class="session-user" onClick={() => {
               if (draft.userMenuClosing) { draft.userMenuClosing = false; draft.userMenuOpen = true; notify(); return; }
               if (draft.userMenuOpen) closeUserMenu();
@@ -3535,35 +3547,31 @@ type ExamQuestion = {
   correctIndex: number;
 };
 
-const EXAM_PASSED_KEY = "vjudge-duel.exam-passed.v2";
-const EXAM_QUESTIONS_KEY = "vjudge-duel.exam-questions.v2";
+const EXAM_PASSED_KEY = "vjudge-duel.exam-passed.v3";
+const EXAM_TOTAL = 20;
+const EXAM_RULES_URL = "https://gengen.qzz.io/duel/rule";
 
 const EXAM_QUESTION_BANK: ExamQuestion[] = [
-  { id: "q01", question: "VJudge Duel 最多支持几个人同时对决？", options: ["2 人", "4 人", "6 人", "不限制"], correctIndex: 0 },
-  { id: "q02", question: "对决中是否可以中途退出？", options: ["可以随时退出", "不可以退出", "只能在准备阶段退出", "只能在对方同意后退出"], correctIndex: 0 },
-  { id: "q03", question: "Rating（评分）在对决中的作用是？", options: ["仅用于展示", "匹配对手和排名", "决定题目难度", "影响对决时间"], correctIndex: 1 },
-  { id: "q04", question: "如果检测到作弊行为，系统会如何处理？", options: ["警告一次", "扣 10 Rating", "Rating 清零并全局封禁", "仅本场判负"], correctIndex: 2 },
-  { id: "q05", question: "对决中是否可以使用外部工具或代码？", options: ["可以随意使用", "禁止使用任何外部工具", "可以使用但需提前声明", "只有管理员可以使用"], correctIndex: 1 },
+  { id: "q01", question: "本网站名为", options: ["VJudge Duel", "CF Duel", "Luogu Duel", "AT Duel"], correctIndex: 0 },
+  { id: "q02", question: "用户的基础 rating 为", options: ["1300", "1200", "1100", "1000"], correctIndex: 0 },
+  { id: "q03", question: "如果在对决中被自动封禁系统检测到作弊，会发生什么？", options: ["处以封禁账户及棕名处罚，且 rating 降为 0", "禁赛 1 天", "扣除 100 rating", "被官方刺杀"], correctIndex: 0 },
+  { id: "q04", question: "橙名所对应的 rating 范围是", options: ["[1550,1650)", "[1550,1650]", "[1500,1600]", "[1550,1600)"], correctIndex: 0 },
+  { id: "q05", question: "对决中是否可以提交之前通过的代码？", options: ["不可以", "可以", "我也不知道能不能", "我管你能不能"], correctIndex: 0 },
   { id: "q06", question: "VJudge Duel 支持的判题平台不包括哪个？", options: ["洛谷", "Codeforces", "AtCoder", "LeetCode"], correctIndex: 3 },
-  { id: "q07", question: "一道题目被一方解答后，另一方还能解答吗？", options: ["可以", "不可以", "只能在 5 分钟内解答", "需要投票决定"], correctIndex: 1 },
-  { id: "q08", question: "对决开始后，旁观者能否发送聊天消息？", options: ["可以发送公开消息", "可以发送队内消息", "不能发送任何消息", "只能在观战频道发言"], correctIndex: 2 },
-  { id: "q09", question: "如果有人在对决中辱骂他人，你应该？", options: ["骂回去", "无视继续比赛", "使用系统内的举报/屏蔽功能", "直接退出"], correctIndex: 2 },
-  { id: "q10", question: "VJudge Duel 的对决是否需要 VJudge 账号？", options: ["不需要", "必需 VJudge 账号", "仅创建房间需要", "仅参加对决需要"], correctIndex: 1 },
-  { id: "q11", question: "当所有玩家准备就绪后，对决会？", options: ["需要房主手动开始", "自动开始", "等待 30 秒后开始", "需要所有玩家再次确认"], correctIndex: 1 },
-  { id: "q12", question: "一道题目的得分由什么决定？", options: ["题目难度", "玩家等级", "房主指定", "随机分配"], correctIndex: 0 },
-  { id: "q13", question: "如果对题目有异议，可以怎么做？", options: ["直接跳过", "发起换题投票", "联系出题人", "退出对决"], correctIndex: 1 },
-  { id: "q14", question: "对决中是否可以观战其他人的比赛？", options: ["不可以", "只有管理员可以", "可以加入公开房间观战", "需要付费"], correctIndex: 2 },
-  { id: "q15", question: "Rating 系统的 K 因子受什么影响？", options: ["题目数量", "对决时长", "对决平均难度", "胜负次数"], correctIndex: 2 },
-  { id: "q16", question: "房主在对决开始后还能踢人吗？", options: ["可以随时踢人", "不能踢人", "只能踢观战者", "需要投票通过"], correctIndex: 1 },
-  { id: "q17", question: "VJudge Duel 中，失败的后果是什么？", options: ["账号封禁", "Rating 下降", "不能再次对决", "题目清空"], correctIndex: 1 },
+  { id: "q07", question: "一道题目被一方抢占后，另一方还能抢占吗？", options: ["可以", "不可以", "只能在一定时间内解答", "房主可以设置"], correctIndex: 1 },
+  { id: "q08", question: "如果在使用过程中发现 Bug，您应该", options: ["在 QQ 群中反馈给管理员", "在 VJudge Duel 的讨论区中反馈", "利用 Bug 做对自己有利的事情", "装作不知道"], correctIndex: 0 },
+  { id: "q09", question: "如果有不认识的人误入私下对决的房间，您可以", options: ["将其踢出", "无视继续比赛", "开一个私人房间，需要输入验证码加入", "辱骂对方，将其驱逐"], correctIndex: 0 },
+  { id: "q10", question: "此网站的开发者是", options: ["liyifan202201", "Gcend", "GCSG01", "General0826"], correctIndex: 0 },
+  { id: "q11", question: "对决开始的条件是", options: ["房主手动开始", "所有用户准备之后自动开始", "我想开始就开始", "其实根本开始不了"], correctIndex: 1 },
+  { id: "q12", question: "对决结束后，rating 的变化情况与以下哪个选项无关？", options: ["做题速度", "题目难度", "两队 rating 的平均值", "对战结果（胜 / 平 / 负）"], correctIndex: 0 },
+  { id: "q13", question: "用户是否应该在洛谷上发表有关 VJudge Duel 的相关言论？", options: ["不应该", "应该", "如果你想使用 VJudge Duel 的话最好不要这么做", "选这个，你就要全部重新答一遍了"], correctIndex: 0 },
+  { id: "q14", question: "如果在公开讨论区发布轻微违法内容会怎么样？", options: ["处以禁言处罚", "无事发生", "处以封禁账户及棕名", "喵~，群主可爱捏"], correctIndex: 0 },
+  { id: "q15", question: "本网站是否收费", options: ["不收费，但支持赞赏", "收费", "不收费不准用完整版", "我没钱"], correctIndex: 0 },
+  { id: "q16", question: "如果对战一方想要投降，需要", options: ["己方全员投票通过", "己方半数以上投票通过", "房主同意", "双方全员投票通过"], correctIndex: 0 },
+  { id: "q17", question: "在主页中可以看到哪些信息？", options: ["仅排行榜", "仅公开房间", "公开房间和排行榜", "仅公告"], correctIndex: 2 },
   { id: "q18", question: "以下哪项不属于 VJudge Duel 的题目来源？", options: ["洛谷公共题库", "Codeforces 题目", "AtCoder 题目", "自定义原创题目"], correctIndex: 3 },
   { id: "q19", question: "对决结束后，房间会保留多久？", options: ["立即删除", "保留 1 小时", "保留 3 天", "永久保留"], correctIndex: 2 },
-  { id: "q20", question: "如果发现任何 bug 或建议，可以通过什么渠道反馈？", options: ["在聊天中直接提出", "联系管理员或提交工单", "自己修改代码", "到 GitHub 提 issue"], correctIndex: 1 },
-  { id: "q21", question: "低难度（橙色及以下）题目每天最多创建几场房间？", options: ["不限制", "5 场", "1 场", "3 场"], correctIndex: 2 },
-  { id: "q22", question: "在对决中是否允许多人使用同一账号？", options: ["允许", "不允许", "仅在练习模式下允许", "需要报备"], correctIndex: 1 },
-  { id: "q23", question: "对决中如果所有对方玩家都离线了，会发生什么？", options: ["比赛继续", "自动判胜", "比赛暂停", "需要等待对方回来"], correctIndex: 1 },
-  { id: "q24", question: "在主页中可以看到哪些信息？", options: ["仅排行榜", "仅公开房间", "公开房间和排行榜", "仅公告"], correctIndex: 2 },
-  { id: "q25", question: "换题投票需要多少通过率？", options: ["简单多数（>50%）", "全票通过", "三分之二以上", "房主决定"], correctIndex: 0 },
+  { id: "q20", question: "低难度（橙色及以下）题目每天最多创建几场房间？", options: ["不限制", "5 场", "1 场", "3 场"], correctIndex: 2 },
 ];
 
 let examQuestions: ExamQuestion[] = [];
@@ -3581,61 +3589,90 @@ function shuffleArray<T>(arr: T[]): T[] {
   return a;
 }
 
+const shuffleExamOptions = (question: ExamQuestion): ExamQuestion => {
+  const order = shuffleArray(question.options.map((_, index) => index));
+  return {
+    id: question.id,
+    question: question.question,
+    options: order.map((index) => question.options[index]),
+    correctIndex: order.indexOf(question.correctIndex)
+  };
+};
+
 const startExam = () => {
-  const shuffled = shuffleArray(EXAM_QUESTION_BANK).slice(0, 20);
-  examQuestions = shuffled;
+  examQuestions = shuffleArray(EXAM_QUESTION_BANK).slice(0, EXAM_TOTAL).map(shuffleExamOptions);
   examCurrentIndex = 0;
   examAnswers = {};
   examStarted = true;
   examSubmitted = false;
-  try {
-    localStorage.setItem(EXAM_QUESTIONS_KEY, JSON.stringify(shuffled.map((q) => q.id)));
-  } catch { /* ignore */ }
 };
+
+const isExamPath = (): boolean => location.pathname.replace(/\/+$/, "") === "/exam";
 
 const isExamPassed = (): boolean => {
   try { return localStorage.getItem(EXAM_PASSED_KEY) === "1"; } catch { return false; }
 };
 
 const isExamRequired = (): boolean => {
-  // 通过后不再需要考试；
   if (isExamPassed()) return false;
   return true;
 };
 
+const examAnsweredCount = (): number => examQuestions.reduce(
+  (sum, _question, index) => sum + (examAnswers[index] === undefined ? 0 : 1),
+  0
+);
+
 const handleExamSubmit = async () => {
-  examSubmitted = true;
-  notify();
-  // 检查答案
-  let allCorrect = true;
-  for (let i = 0; i < examQuestions.length; i += 1) {
-    const q = examQuestions[i];
-    if (examAnswers[i] !== q.correctIndex) {
-      allCorrect = false;
-      break;
-    }
+  const total = examQuestions.length;
+  const answered = examAnsweredCount();
+  if (!total || answered < total) {
+    setStatus(`还有 ${total - answered} 题未作答`, "error");
+    return;
   }
-  if (allCorrect) {
+  const confirmed = await Swal.fire({
+    title: "确认提交？",
+    html: "<p>提交后将立即判定，未全部答对需要重新抽题作答。</p>",
+    icon: "question",
+    showCancelButton: true,
+    confirmButtonText: "提交",
+    cancelButtonText: "再检查一下",
+    customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm", cancelButton: "duel-swal-cancel" }
+  });
+  if (!confirmed.isConfirmed) return;
+
+  examSubmitted = true;
+  setStatus("正在判定考试结果");
+  notify();
+
+  let wrong = 0;
+  for (let i = 0; i < examQuestions.length; i += 1) {
+    if (examAnswers[i] !== examQuestions[i].correctIndex) wrong += 1;
+  }
+
+  if (wrong === 0) {
     try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
     await Swal.fire({
       title: "考试通过",
-      html: "<p>恭喜你通过了 VJudge Duel 规则考试！现在可以正常使用了。</p>",
+      html: "<p>恭喜你通过了 VJudge Duel 规则考试，现在可以正常使用了。</p>",
       icon: "success",
       confirmButtonText: "开始使用",
       customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
     });
     location.href = "/";
-  } else {
-    await Swal.fire({
-      title: "未通过",
-      html: "<p>有题目回答错误，请刷新后重新作答。</p><p style='color:var(--danger-text);font-size:13px'>提示：请仔细阅读规则后再答题。</p>",
-      icon: "error",
-      confirmButtonText: "重新考试",
-      customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
-    });
-    try { localStorage.removeItem(EXAM_QUESTIONS_KEY); } catch { /* ignore */ }
-    location.reload();
+    return;
   }
+
+  await Swal.fire({
+    title: "未通过",
+    html: `<p>共有 <b>${wrong}</b> 题回答错误，需要重新作答。</p><p style="color:var(--danger-text);font-size:13px">提示：请先仔细阅读规则页，题目与选项顺序每次都会重新随机。</p>`,
+    icon: "error",
+    confirmButtonText: "重新考试",
+    customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
+  });
+  startExam();
+  setStatus("请重新作答规则考试", "error");
+  notify();
 };
 
 const selectExamOption = (optionIndex: number) => {
@@ -3643,74 +3680,124 @@ const selectExamOption = (optionIndex: number) => {
   notify();
 };
 
+const gotoExamQuestion = (index: number) => {
+  if (index < 0 || index >= examQuestions.length) return;
+  examCurrentIndex = index;
+  notify();
+};
+
 const ExamPage = () => {
-  if (examSubmitted) {
+  const total = examQuestions.length;
+  const question = examQuestions[examCurrentIndex];
+  if (examSubmitted || !question) {
     return (
-      <div class="exam-container">
-        <div class="exam-card">
-          <h1>VJudge Duel 规则考试</h1>
-          <p class="exam-status-text">正在检查答案…</p>
-        </div>
-      </div>
+      <main class="exam-grid exam-grid-single">
+        <section class="command-panel exam-brief">
+          <div class="section-head">
+            <Shield size={18} />
+            <div>
+              <h1>规则考试</h1>
+              <p>{examSubmitted ? "正在判定答案…" : "题库加载失败，请刷新页面重试。"}</p>
+            </div>
+          </div>
+        </section>
+      </main>
     );
   }
-  const q = examQuestions[examCurrentIndex];
-  if (!q) {
-    return (
-      <div class="exam-container">
-        <div class="exam-card">
-          <h1>VJudge Duel 规则考试</h1>
-          <p class="exam-status-text">题库加载失败，请刷新页面重试。</p>
-        </div>
-      </div>
-    );
-  }
+
+  const answered = examAnsweredCount();
   const currentAnswer = examAnswers[examCurrentIndex];
-  const progress = `${examCurrentIndex + 1} / ${examQuestions.length}`;
-  const isLast = examCurrentIndex === examQuestions.length - 1;
-  const hasCurrent = currentAnswer !== undefined;
+  const isLast = examCurrentIndex === total - 1;
+  const allAnswered = answered === total;
+  const percent = total ? Math.round((answered / total) * 100) : 0;
 
   return (
-    <div class="exam-container">
-      <div class="exam-card">
-        <h1>VJudge Duel 规则考试</h1>
-        <p class="exam-subtitle">请认真作答，共 20 题，全部答对方可通过。</p>
-
-        <div class="exam-progress-row">
-          <span class="exam-progress">{progress}</span>
-          <a class="exam-rules-link" href="https://gengen.qzz.io/duel/rule" target="_blank" rel="noopener noreferrer">查看规则</a>
+    <main class="exam-grid">
+      <section class="command-panel exam-brief">
+        <div class="section-head">
+          <Shield size={18} />
+          <div>
+            <h1>规则考试</h1>
+            <p>通过后即可进入 VJudge Duel。</p>
+          </div>
         </div>
 
-        <div class="exam-question-box">
-          <p class="exam-question-text">{q.question}</p>
-          <div class="exam-options">
-            {q.options.map((opt, idx) => (
+        <div class="home-announcement exam-notice">
+          <h3>作答须知</h3>
+          <ul class="exam-rule-list">
+            <li>共 <b>{total}</b> 题，<b>全部答对</b>方可通过。</li>
+            <li>题目顺序与选项顺序每次均随机生成。</li>
+            <li>未通过可立即重考，重考会重新抽题。</li>
+            <li>作答期间刷新页面将重新开始。</li>
+          </ul>
+          <div class="announcement-actions">
+            <button type="button" class="rules-ticket" onClick={() => window.open(EXAM_RULES_URL, "_blank")}>
+              打开规则
+            </button>
+          </div>
+        </div>
+
+        <div class="exam-progress-block">
+          <div class="exam-progress-head">
+            <span>作答进度</span>
+            <strong>{answered} / {total}</strong>
+          </div>
+          <div class="exam-progress-bar"><i style={{ width: `${percent}%` }} /></div>
+          <div class="exam-dots">
+            {examQuestions.map((item, index) => (
               <button
-                key={idx}
-                class={`exam-option${currentAnswer === idx ? " selected" : ""}`}
-                onClick={() => selectExamOption(idx)}
-              >{opt}</button>
+                key={item.id}
+                type="button"
+                class={`exam-dot${index === examCurrentIndex ? " current" : ""}${examAnswers[index] === undefined ? "" : " done"}`}
+                onClick={() => gotoExamQuestion(index)}
+              >{index + 1}</button>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section class="panel exam-question-panel">
+        <PanelTitle icon={<Terminal size={15} />} title="QUESTION" detail={`${examCurrentIndex + 1} / ${total}`} />
+
+        <div class="exam-body">
+          <p class="exam-question-text">{question.question}</p>
+          <div class="exam-options">
+            {question.options.map((option, index) => (
+              <button
+                key={`${question.id}-${index}`}
+                type="button"
+                class={`exam-option${currentAnswer === index ? " selected" : ""}`}
+                onClick={() => selectExamOption(index)}
+              >
+                <span class="exam-option-key">{String.fromCharCode(65 + index)}</span>
+                <span class="exam-option-text">{option}</span>
+                {currentAnswer === index ? <Check size={16} /> : null}
+              </button>
             ))}
           </div>
         </div>
 
         <div class="exam-nav">
           <button
-            class="exam-nav-btn"
+            class="ghost"
             disabled={examCurrentIndex === 0}
-            onClick={() => { examCurrentIndex -= 1; notify(); }}
+            onClick={() => gotoExamQuestion(examCurrentIndex - 1)}
           >上一题</button>
+          <span class="exam-nav-hint">
+            {allAnswered ? "全部题目已作答" : `还有 ${total - answered} 题未作答`}
+          </span>
           {isLast ? (
-            <button class="exam-submit-btn" onClick={() => void handleExamSubmit()}>提交</button>
+            <button class="primary" disabled={!allAnswered} onClick={() => void handleExamSubmit()}>
+              <Check size={15} />提交
+            </button>
           ) : (
-            <button
-              class="exam-nav-btn"
-              onClick={() => { examCurrentIndex += 1; notify(); }}
-            >下一题</button>
+            <button class="primary" onClick={() => gotoExamQuestion(examCurrentIndex + 1)}>
+              下一题<ChevronRight size={15} />
+            </button>
           )}
         </div>
-      </div>
-    </div>
+      </section>
+    </main>
   );
 };
 
