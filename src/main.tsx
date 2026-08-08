@@ -359,6 +359,11 @@ const finishBootScreen = () => {
 };
 
 const boot = async () => {
+  // 考试门禁：未通过考试的用户，在任何校验（含 VJudge 登录）之前强制重定向到 /exam。
+  if (isExamRequired() && !isExamPath()) {
+    location.replace("/exam");
+    return;
+  }
   identity = await loadIdentity();
   applyTheme();
   void loadAnnouncement();
@@ -413,11 +418,6 @@ const boot = async () => {
   identity = await renameIdentity(identity, vjudgeSession.username);
   bootPhase = "ready";
   await registerCurrentUser();
-
-  if (isExamRequired() && !isExamPath()) {
-    location.replace("/exam");
-    return; 
-  }
 
   await enterFromHash();
   finishBootScreen();
@@ -1876,6 +1876,12 @@ const judgeProblem = async (problem: Problem) => {
 
 const App = () => {
   if (temporaryBanUntil > Date.now()) return <TemporaryBlockOverlay />;
+  // 考试门禁：未通过考试者一律强制重定向到 /exam，任何渲染路径都不泄露主页/房间/管理页内容。
+  // 放在渲染层而非仅 boot()，可堵住 hashchange 等绕过入口；已在 /exam 路径时不重复触发。
+  if (isExamRequired() && !isExamPath()) {
+    location.replace("/exam");
+    return <BootScreen leaving={false} />;
+  }
   if (bootPhase === "loading") {
     return mode === "profile" ? <ProfileSkeleton /> : <BootScreen leaving={false} />;
   }
@@ -3561,16 +3567,16 @@ const EXAM_QUESTION_BANK: ExamQuestion[] = [
   { id: "q07", question: "一道题目被一方抢占后，另一方还能抢占吗？", options: ["可以", "不可以", "只能在一定时间内解答", "房主可以设置"], correctIndex: 1 },
   { id: "q08", question: "如果在使用过程中发现 Bug，您应该", options: ["在 QQ 群中反馈给管理员", "在 VJudge Duel 的讨论区中反馈", "利用 Bug 做对自己有利的事情", "装作不知道"], correctIndex: 0 },
   { id: "q09", question: "如果有不认识的人误入私下对决的房间，您可以", options: ["将其踢出", "无视继续比赛", "开一个私人房间，需要输入验证码加入", "辱骂对方，将其驱逐"], correctIndex: 0 },
-  { id: "q10", question: "此网站的开发者是", options: ["liyifan202201", "Gcend", "GCSG01", "General0826"], correctIndex: 0 },
+  { id: "q10", question: "如果你大量发送无意义或违规内容，你将会？", options: ["被刺杀", "被封禁或禁言", "我管你能不能", "被开发者黑入"], correctIndex: 1 },
   { id: "q11", question: "对决开始的条件是", options: ["房主手动开始", "所有用户准备之后自动开始", "我想开始就开始", "其实根本开始不了"], correctIndex: 1 },
   { id: "q12", question: "对决结束后，rating 的变化情况与以下哪个选项无关？", options: ["做题速度", "题目难度", "两队 rating 的平均值", "对战结果（胜 / 平 / 负）"], correctIndex: 0 },
-  { id: "q13", question: "用户是否应该在洛谷上发表有关 VJudge Duel 的相关言论？", options: ["不应该", "应该", "如果你想使用 VJudge Duel 的话最好不要这么做", "选这个，你就要全部重新答一遍了"], correctIndex: 0 },
+  { id: "q13", question: "用户是否应该在洛谷上发表帖子或工单有关 VJudge Duel 的相关言论？", options: ["不应该", "应该", "如果你想使用 VJudge Duel 的话最好不要这么做", "选这个，你就要全部重新答一遍了"], correctIndex: 0 },
   { id: "q14", question: "如果在公开讨论区发布轻微违法内容会怎么样？", options: ["处以禁言处罚", "无事发生", "处以封禁账户及棕名", "喵~，群主可爱捏"], correctIndex: 0 },
   { id: "q15", question: "本网站是否收费", options: ["不收费，但支持赞赏", "收费", "不收费不准用完整版", "我没钱"], correctIndex: 0 },
   { id: "q16", question: "如果对战一方想要投降，需要", options: ["己方全员投票通过", "己方半数以上投票通过", "房主同意", "双方全员投票通过"], correctIndex: 0 },
   { id: "q17", question: "在主页中可以看到哪些信息？", options: ["仅排行榜", "仅公开房间", "公开房间和排行榜", "仅公告"], correctIndex: 2 },
   { id: "q18", question: "以下哪项不属于 VJudge Duel 的题目来源？", options: ["洛谷公共题库", "Codeforces 题目", "AtCoder 题目", "自定义原创题目"], correctIndex: 3 },
-  { id: "q19", question: "对决结束后，房间会保留多久？", options: ["立即删除", "保留 1 小时", "保留 3 天", "永久保留"], correctIndex: 2 },
+  { id: "q19", question: "如果你被自动封禁给误封了，你可以？", options: ["用 QQ 或洛谷发起申诉，附带你的代码记录和封禁前 Rating", "变成猫娘", "发文辱骂 VD", "注册小号"], correctIndex: 0 },
   { id: "q20", question: "低难度（橙色及以下）题目每天最多创建几场房间？", options: ["不限制", "5 场", "1 场", "3 场"], correctIndex: 2 },
 ];
 
@@ -3579,6 +3585,9 @@ let examCurrentIndex = 0;
 let examAnswers: Record<number, number> = {};
 let examStarted = false;
 let examSubmitted = false;
+let examReviewing = false;
+let examWrongIds: string[] = [];
+let examAutoAdvanceTimer: ReturnType<typeof setTimeout> | undefined;
 
 function shuffleArray<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -3599,12 +3608,25 @@ const shuffleExamOptions = (question: ExamQuestion): ExamQuestion => {
   };
 };
 
-const startExam = () => {
-  examQuestions = shuffleArray(EXAM_QUESTION_BANK).slice(0, EXAM_TOTAL).map(shuffleExamOptions);
+const startExam = (wrongIds?: string[]) => {
+  clearTimeout(examAutoAdvanceTimer);
+  examReviewing = false;
+  if (wrongIds && wrongIds.length > 0) {
+    const byId = new Map(EXAM_QUESTION_BANK.map((q) => [q.id, q]));
+    examQuestions = wrongIds
+      .map((id) => byId.get(id))
+      .filter((q): q is ExamQuestion => Boolean(q))
+      .map(shuffleExamOptions);
+    examWrongIds = [...wrongIds];
+  } else {
+    examQuestions = shuffleArray(EXAM_QUESTION_BANK).slice(0, EXAM_TOTAL).map(shuffleExamOptions);
+    examWrongIds = [];
+  }
   examCurrentIndex = 0;
   examAnswers = {};
   examStarted = true;
   examSubmitted = false;
+  notify();
 };
 
 const isExamPath = (): boolean => location.pathname.replace(/\/+$/, "") === "/exam";
@@ -3632,7 +3654,7 @@ const handleExamSubmit = async () => {
   }
   const confirmed = await Swal.fire({
     title: "确认提交？",
-    html: "<p>提交后将立即判定，未全部答对需要重新抽题作答。</p>",
+    html: "<p>提交后将立即判定，未通过可查看错题并重考。</p>",
     icon: "question",
     showCancelButton: true,
     confirmButtonText: "提交",
@@ -3646,8 +3668,12 @@ const handleExamSubmit = async () => {
   notify();
 
   let wrong = 0;
+  const wrongIds: string[] = [];
   for (let i = 0; i < examQuestions.length; i += 1) {
-    if (examAnswers[i] !== examQuestions[i].correctIndex) wrong += 1;
+    if (examAnswers[i] !== examQuestions[i].correctIndex) {
+      wrong += 1;
+      wrongIds.push(examQuestions[i].id);
+    }
   }
 
   if (wrong === 0) {
@@ -3663,21 +3689,31 @@ const handleExamSubmit = async () => {
     return;
   }
 
+  examWrongIds = wrongIds;
+  examSubmitted = true;
+  examReviewing = true;
+  setStatus(`考试未通过：${wrong} 题答错`, "error");
+  notify();
+
   await Swal.fire({
     title: "未通过",
-    html: `<p>共有 <b>${wrong}</b> 题回答错误，需要重新作答。</p><p style="color:var(--danger-text);font-size:13px">提示：请先仔细阅读规则页，题目与选项顺序每次都会重新随机。</p>`,
+    html: `<p>共有 <b>${wrong}</b> 题回答错误，已为你列出错题与正确答案。</p><p style="color:var(--danger-text);font-size:13px">题目与选项顺序每次都会重新随机，建议先阅读规则页再重考。</p>`,
     icon: "error",
-    confirmButtonText: "重新考试",
+    confirmButtonText: "查看错题",
     customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
   });
-  startExam();
-  setStatus("请重新作答规则考试", "error");
-  notify();
 };
 
 const selectExamOption = (optionIndex: number) => {
   examAnswers[examCurrentIndex] = optionIndex;
   notify();
+  if (examCurrentIndex < examQuestions.length - 1) {
+    clearTimeout(examAutoAdvanceTimer);
+    examAutoAdvanceTimer = setTimeout(() => {
+      examCurrentIndex += 1;
+      notify();
+    }, 300);
+  }
 };
 
 const gotoExamQuestion = (index: number) => {
@@ -3686,9 +3722,85 @@ const gotoExamQuestion = (index: number) => {
   notify();
 };
 
+const ExamReviewPage = () => {
+  const wrongList = examQuestions
+    .map((q, index) => ({ q, user: examAnswers[index] }))
+    .filter(({ q, user }) => user !== q.correctIndex);
+  const total = examQuestions.length;
+  const correctCount = total - wrongList.length;
+  const percent = total ? Math.round((correctCount / total) * 100) : 0;
+
+  return (
+    <main class="exam-grid">
+      <section class="command-panel exam-brief">
+        <div class="section-head">
+          <Shield size={18} />
+          <div>
+            <h1>错题回顾</h1>
+            <p>答对 {correctCount} / {total}，{correctCount === total ? "满分通过！" : "请继续努力"}</p>
+          </div>
+        </div>
+
+        <div class="exam-review-score">
+          <div class="exam-review-score-bar-bg">
+            <div class="exam-review-score-bar-fill" style={{ width: `${percent}%` }} />
+          </div>
+          <div class="exam-review-score-rows">
+            <span class="exam-review-score-row correct"><Check size={14} />答对 {correctCount}</span>
+            <span class="exam-review-score-row wrong"><X size={14} />答错 {wrongList.length}</span>
+          </div>
+        </div>
+
+        <div class="exam-review-legend">
+          <span class="legend-correct" />正确答案
+          <span class="legend-wrong" />你的选择
+        </div>
+
+        <div class="exam-review-actions">
+          <button type="button" class="primary" onClick={() => startExam(examWrongIds)}>
+            <RefreshCw size={15} />重考错题（{wrongList.length}）
+          </button>
+          <button type="button" class="ghost" onClick={() => startExam()}>
+            重新考全部
+          </button>
+        </div>
+      </section>
+
+      <section class="panel exam-review-right">
+        <PanelTitle icon={<Terminal size={15} />} title="ANSWER REVIEW" detail={`${wrongList.length} 题`} />
+        <div class="exam-body exam-review-list">
+          {wrongList.map(({ q, user }, idx) => (
+            <div class="exam-review-item" key={q.id}>
+              <div class="exam-review-q-head">
+                <span class="exam-review-q-num">{(idx + 1).toString().padStart(2, "0")}</span>
+                <p class="exam-question-text">{q.question}</p>
+              </div>
+              <div class="exam-options">
+                {q.options.map((option, index) => {
+                  const isCorrect = index === q.correctIndex;
+                  const isUser = index === user;
+                  const cls = isCorrect ? " correct" : isUser ? " wrong" : "";
+                  return (
+                    <div class={`exam-option exam-review-option${cls}`} key={`${q.id}-${index}`}>
+                      <span class="exam-option-key">{String.fromCharCode(65 + index)}</span>
+                      <span class="exam-option-text">{option}</span>
+                      {isCorrect ? <Check size={16} /> : isUser ? <X size={16} /> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+};
+
 const ExamPage = () => {
   const total = examQuestions.length;
   const question = examQuestions[examCurrentIndex];
+  if (examReviewing) return <ExamReviewPage />;
   if (examSubmitted || !question) {
     return (
       <main class="exam-grid exam-grid-single">
@@ -3727,8 +3839,9 @@ const ExamPage = () => {
           <ul class="exam-rule-list">
             <li>共 <b>{total}</b> 题，<b>全部答对</b>方可通过。</li>
             <li>题目顺序与选项顺序每次均随机生成。</li>
-            <li>未通过可立即重考，重考会重新抽题。</li>
+            <li>未通过会展示错题与正确答案，可只重考错题。</li>
             <li>作答期间刷新页面将重新开始。</li>
+            <li>所有题目都非常简单，并且都在 faq 上说明了</li>
           </ul>
           <div class="announcement-actions">
             <button type="button" class="rules-ticket" onClick={() => window.open(EXAM_RULES_URL, "_blank")}>

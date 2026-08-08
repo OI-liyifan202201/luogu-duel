@@ -3583,4 +3583,205 @@ body .cheat-swal-confirm.duel-swal-confirm:hover {
     flex: 1;
     justify-content: center;
   }
+
+  .exam-review-q-head {
+    padding: 10px 10px 0;
+  }
+
+  .exam-review-item .exam-option {
+    padding: 7px 10px;
+  }
+
+  .exam-review-item .exam-question-text {
+    font-size: 14px;
+  }
+
+  .exam-review-q-num {
+    width: 24px;
+    height: 24px;
+    font-size: 11px;
+  }
 }
+
+/* 错题回顾 */
+.exam-review-score {
+  margin: 14px 0 12px;
+}
+
+.exam-review-score-bar-bg {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.exam-review-score-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--green);
+  transition: width 600ms ease;
+}
+
+.exam-review-score-rows {
+  display: flex;
+  gap: 14px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.exam-review-score-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.exam-review-score-row.correct { color: var(--green); }
+.exam-review-score-row.wrong { color: var(--red); }
+
+.exam-review-legend {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.exam-review-legend .legend-correct,
+.exam-review-legend .legend-wrong {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
+.exam-review-legend .legend-correct { background: var(--green); }
+.exam-review-legend .legend-wrong { background: var(--red); }
+
+.exam-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.exam-review-actions > button {
+  flex: 1;
+  min-width: 150px;
+  justify-content: center;
+}
+
+/* right panel */
+.exam-review-right {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.exam-review-list {
+  display: grid;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 2px 1px;
+  min-height: 0;
+}
+
+.exam-review-item {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--panel-radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.exam-review-q-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px 0;
+}
+
+.exam-review-q-num {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--control-radius);
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  color: var(--red);
+  font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.exam-review-item .exam-question-text {
+  margin: 0;
+  padding: 4px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.exam-review-item .exam-options {
+  padding: 10px 0 0;
+}
+
+.exam-review-item .exam-option {
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+  min-height: 38px;
+  padding: 8px 14px;
+}
+
+.exam-review-item .exam-option:first-child {
+  border-top: none;
+}
+
+/* option state colors */
+.exam-review-option { cursor: default; }
+
+.exam-review-option.correct {
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+
+.exam-review-option.correct .exam-option-key {
+  border-color: var(--green);
+  background: var(--green);
+  color: var(--panel);
+}
+
+.exam-review-option.correct .exam-option-text {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.exam-review-option.correct > svg {
+  color: var(--green);
+}
+
+.exam-review-option.wrong {
+  background: color-mix(in srgb, var(--red) 8%, transparent);
+}
+
+.exam-review-option.wrong .exam-option-key {
+  border-color: var(--red);
+  background: var(--red);
+  color: var(--on-accent);
+}
+
+.exam-review-option.wrong .exam-option-text {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.exam-review-option.wrong > svg {
+  color: var(--red);
+}
+
+.exam-review-option.correct:hover,
+.exam-review-option.wrong:hover {
+  transform: none;
+}
+
+.exam-review-option.correct:hover { background: color-mix(in srgb, var(--green) 8%, transparent); }
+.exam-review-option.wrong:hover { background: color-mix(in srgb, var(--red) 8%, transparent); }

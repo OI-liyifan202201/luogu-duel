@@ -26,7 +26,7 @@ const statusRank: Record<JudgeStatus, number> = {
 };
 
 export const ADMIN_NAMES = new Set(["general0826", "slmxf", "liyifan202201", "gcend", "gcsg01","imzfx_square"]);
-export const SYSTEM_CHAT_PREFIX = "@@luogu-duel-system:";
+export const SYSTEM_CHAT_PREFIX = "@@vjudge-duel-system:";
 
 export type SystemChatCommand =
   | { kind: "room.configured"; problems: Problem[]; rated?: boolean; minimumDifficulty?: number }
