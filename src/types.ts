@@ -235,6 +235,7 @@ export type DuelEvent =
       lamport: number;
       issuedAt: number;
       targetName: string;
+      system?: boolean;
     }
   | {
       type: "player.muted";
@@ -245,6 +246,7 @@ export type DuelEvent =
       issuedAt: number;
       targetId: string;
       targetName?: string;
+      system?: boolean;
     }
   | {
       type: "player.unmuted";
@@ -255,6 +257,7 @@ export type DuelEvent =
       issuedAt: number;
       targetId: string;
       targetName?: string;
+      system?: boolean;
     }
   | {
       type: "room.muted" | "room.unmuted";

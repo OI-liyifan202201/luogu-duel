@@ -176,13 +176,13 @@ export const applyEvent = (state: DuelState, event: DuelEvent): DuelState => {
       kickPlayer(next, event);
       break;
     case "player.unkicked":
-      unkickPlayer(next, event.actorId, event.targetName, event.issuedAt);
+      unkickPlayer(next, event.actorId, event.targetName, event.issuedAt, event.system);
       break;
     case "player.muted":
-      mutePlayer(next, event.actorId, event.targetId, event.targetName, event.issuedAt);
+      mutePlayer(next, event.actorId, event.targetId, event.targetName, event.issuedAt, event.system);
       break;
     case "player.unmuted":
-      unmutePlayer(next, event.actorId, event.targetId, event.targetName, event.issuedAt);
+      unmutePlayer(next, event.actorId, event.targetId, event.targetName, event.issuedAt, event.system);
       break;
     case "room.muted":
       if (isRoomModerator(next, event.actorId) && !next.muted["__room__"]) {
@@ -506,9 +506,12 @@ const kickPlayer = (state: DuelState, event: Extract<DuelEvent, { type: "player.
   pushSystem(state, `${finalTargetName} 已被 ${actor.luoguName} 封禁：${record.reason}`, at);
 };
 
-const unkickPlayer = (state: DuelState, actorId: string, targetName: string, at: number) => {
-  const actor = state.players[actorId];
-  if (!actor || !isAdminName(actor.luoguName)) return;
+const unkickPlayer = (state: DuelState, actorId: string, targetName: string, at: number, system?: boolean) => {
+  // system 信封（来自全局封禁的跨房间同步）无需管理员身份即可解除封禁。
+  if (!system) {
+    const actor = state.players[actorId];
+    if (!actor || !isAdminName(actor.luoguName)) return;
+  }
   const normalizedTarget = normalizeName(targetName);
   delete state.banned[normalizedTarget];
   for (const player of Object.values(state.players)) {
@@ -517,27 +520,29 @@ const unkickPlayer = (state: DuelState, actorId: string, targetName: string, at:
       player.online = true;
     }
   }
-  pushSystem(state, `${actor.luoguName} 已解除 ${targetName} 的封禁`, at);
+  pushSystem(state, `${system ? "系统" : state.players[actorId]?.luoguName ?? "管理员"} 已解除 ${targetName} 的封禁`, at);
 };
 
-const mutePlayer = (state: DuelState, actorId: string, targetId: string, targetName: string | undefined, at: number) => {
+const mutePlayer = (state: DuelState, actorId: string, targetId: string, targetName: string | undefined, at: number, system?: boolean) => {
   const actor = state.players[actorId];
   const target = state.players[targetId];
   const finalTargetName = target?.luoguName || targetName || targetId;
-  if (!actor || !isAdminName(actor.luoguName) || isAdminName(finalTargetName)) return;
+  // system 信封（来自全局禁言的跨房间同步）无需管理员身份即可执行。
+  if (!system && (!actor || !isAdminName(actor.luoguName) || isAdminName(finalTargetName))) return;
+  if (system && isAdminName(finalTargetName)) return;
   state.muted[targetId] = true;
   state.muted[`name:${normalizeName(finalTargetName)}`] = true;
-  pushSystem(state, `${finalTargetName} 已被 ${actor.luoguName} 禁言`, at);
+  pushSystem(state, `${finalTargetName} 已被 ${system ? "系统" : actor.luoguName} 禁言`, at);
 };
 
-const unmutePlayer = (state: DuelState, actorId: string, targetId: string, targetName: string | undefined, at: number) => {
+const unmutePlayer = (state: DuelState, actorId: string, targetId: string, targetName: string | undefined, at: number, system?: boolean) => {
   const actor = state.players[actorId];
   const target = state.players[targetId];
   const finalTargetName = target?.luoguName || targetName || targetId;
-  if (!actor || !isAdminName(actor.luoguName)) return;
+  if (!system && (!actor || !isAdminName(actor.luoguName))) return;
   delete state.muted[targetId];
   delete state.muted[`name:${normalizeName(finalTargetName)}`];
-  pushSystem(state, `${actor.luoguName} 已解除 ${finalTargetName} 的禁言`, at);
+  pushSystem(state, `${system ? "系统" : actor.luoguName} 已解除 ${finalTargetName} 的禁言`, at);
 };
 
 const openVote = (

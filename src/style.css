@@ -3673,17 +3673,20 @@ body .cheat-swal-confirm.duel-swal-confirm:hover {
 
 /* right panel */
 .exam-review-right {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   min-height: 0;
 }
 
 .exam-review-list {
+  flex: 1 1 auto;
   display: grid;
   gap: 12px;
   overflow-y: auto;
-  padding: 2px 1px;
+  padding: 2px 6px 2px 2px;
   min-height: 0;
+  /* 固定高度上限，确保任意视口下错题列表都可滚动，不撑破页面布局。 */
+  max-height: calc(100vh - 110px);
 }
 
 .exam-review-item {

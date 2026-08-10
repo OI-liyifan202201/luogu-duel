@@ -69,7 +69,7 @@ import {
 import { createIdentity, loadIdentity, renameIdentity, signEvent, verifyEnvelope, type LocalIdentity } from "./identity";
 import { cachedProblemCount, defaultRatios, difficultyMeta, parseCustomProblems, pickProblems, pickReplacementProblem, platformLabel, type DifficultyLevel, type PlatformRatios, type ProblemPlatform } from "./problemPicker";
 import { loadVJudgeSession, logoutVJudgeSession, verifyVJudgeLogin, type VJudgeLoginMethod, type VJudgeSession } from "./oauth";
-import { allowServerRequest, clearRoomDraft, directoryWebSocketUrl, fetchLowRoomAvailability, fetchRooms, fetchSnapshot, fetchUserRecord, fetchUsers, publishEnvelope, roomWebSocketUrl, saveUserRecord, setServerRequestWarningHandler, updateUserRating, type RoomListing, type ServerMessage, type UserRecord } from "./realtimeStore";
+import { allowServerRequest, clearRoomDraft, directoryWebSocketUrl, fetchExamStatus, fetchLowRoomAvailability, fetchRooms, fetchSnapshot, fetchUserRecord, fetchUsers, passExamServer, publishEnvelope, roomWebSocketUrl, saveUserRecord, setServerRequestWarningHandler, updateUserRating, type RoomListing, type ServerMessage, type UserRecord } from "./realtimeStore";
 import { fetchVJudgeRecords } from "./vjudge";
 import { AdminPlayersSkeleton, AdminRoomsSkeleton, BootScreen, ChatSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, SkeletonRows } from "./loadingViews";
 import type { ChatMessage, DuelEvent, DuelState, Player, Problem, Seat, SignedEnvelope, VoteKind } from "./types";
@@ -110,6 +110,9 @@ const prunePendingGlobalEvents = (confirmed: DuelEvent[]): void => {
   const ids = new Set(confirmed.map((event) => event.id));
   pendingGlobalEvents = pendingGlobalEvents.filter((event) => !ids.has(event.id));
 };
+// 全局封禁/禁言在房间内的桥接：把这些全局事件以系统消息形式展示在当前房间聊天流中。
+let extraSystemMessages: { id: string; at: number; text: string }[] = [];
+let globalModSeen: Map<string, "ban" | "mute"> = new Map();
 let rooms: RoomListing[] = [];
 let users: UserRecord[] = [];
 let usersLoaded = false;
@@ -249,7 +252,16 @@ let temporaryBanUntil = readStoredNumber(temporaryBanKey);
 let temporaryBanReason = readStoredText(temporaryBanReasonKey) || "操作过于频繁";
 let temporaryMuteUntil = readStoredNumber(temporaryMuteKey);
 
-recordBurst("refresh", 4_000, 3, () => applyTemporaryBan(20_000, "4 秒内刷新次数过多"));
+// 已移除"刷新次数过多"导致的临时封禁机制（该限制会在每次页面加载时计数，误伤正常刷新）。
+// 启动时清理历史残留的该类封禁，避免用户仍被旧记录卡住。
+if (temporaryBanReason.includes("刷新")) {
+  temporaryBanUntil = 0;
+  temporaryBanReason = "操作过于频繁";
+  try {
+    localStorage.removeItem(temporaryBanKey);
+    localStorage.removeItem(temporaryBanReasonKey);
+  } catch { /* ignore */ }
+}
 
 const notify = (forceStickChat = false) => {
   syncViewportScroll();
@@ -359,11 +371,6 @@ const finishBootScreen = () => {
 };
 
 const boot = async () => {
-  // 考试门禁：未通过考试的用户，在任何校验（含 VJudge 登录）之前强制重定向到 /exam。
-  if (isExamRequired() && !isExamPath()) {
-    location.replace("/exam");
-    return;
-  }
   identity = await loadIdentity();
   applyTheme();
   void loadAnnouncement();
@@ -386,11 +393,16 @@ const boot = async () => {
       if (directoryLastPongAt && now - directoryLastPongAt > 120_000) directorySocket.close();
       else directorySocket.send("ping");
     }
+    if (globalSocket?.readyState === WebSocket.OPEN) {
+      if (globalLastPongAt && now - globalLastPongAt > 120_000) globalSocket.close();
+      else globalSocket.send("ping");
+    }
   }, 45_000);
   window.addEventListener("hashchange", () => void enterFromHash());
   window.addEventListener("online", () => {
     connectRoom();
     connectDirectory();
+    connectGlobalModeration();
   });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
@@ -402,6 +414,10 @@ const boot = async () => {
     if (directorySocket?.readyState === WebSocket.OPEN) {
       directoryLastPongAt = now;
       directorySocket.send("ping");
+    }
+    if (globalSocket?.readyState === WebSocket.OPEN) {
+      globalLastPongAt = now;
+      globalSocket.send("ping");
     }
   });
 
@@ -418,18 +434,30 @@ const boot = async () => {
   identity = await renameIdentity(identity, vjudgeSession.username);
   bootPhase = "ready";
   await registerCurrentUser();
+  // 考试门禁在服务端记录中按规范化洛谷用户名持久化，因此需要先登录拿到用户名再查询。
+  await syncExamStatus();
+  await refreshGlobalModeration();
+  if (isExamRequired() && !isExamPath()) {
+    location.replace("/exam");
+    finishBootScreen();
+    return;
+  }
 
   await enterFromHash();
   finishBootScreen();
 };
 
 const enterFromHash = async () => {
+  // 切换房间/页面时重置全局封禁桥接消息，避免串场或重复刷屏。
+  extraSystemMessages = [];
+  globalModSeen = new Map();
   // 规则考试页面
   if (isExamPath()) {
     mode = "exam";
     roomId = "global";
     roomSecret = "public-lobby";
     closeSocket();
+    closeGlobalModeration();
     if (!examStarted) startExam();
     // 顶栏状态条与主站共用，此处覆盖掉启动阶段残留的文案。
     setStatus(isExamPassed() ? "已通过规则考试" : "请完成规则考试");
@@ -445,6 +473,7 @@ const enterFromHash = async () => {
     roomSecret = "public-lobby";
     profileUserName = profileName;
     closeSocket();
+    closeGlobalModeration();
     connectDirectory();
     await Promise.all([loadDirectory(), loadUsers()]);
     profileLoading = true;
@@ -478,6 +507,8 @@ const enterFromHash = async () => {
     usersLoaded = false;
     connectDirectory();
     connectRoom();
+    // 主页/管理页通过 room 通道（global:public-lobby）接收全局 moderation，无需独立 globalSocket。
+    closeGlobalModeration();
     statusTone = "info";
     statusText = "正在连接大厅";
     notify();
@@ -498,6 +529,9 @@ const enterFromHash = async () => {
   envelopes = [];
   notify();
   connectRoom();
+  // 房间内订阅全局 moderation DO 的广播（global:public-lobby），全局封禁/禁言实时生效，
+  // 不再依赖 60s 轮询，减少对服务端的访问。
+  connectGlobalModeration();
   const expectedRoomId = roomId;
   initialFallbackTimer = window.setTimeout(() => {
     if (mode !== "room" || roomId !== expectedRoomId || lastRoomLiveStateAt) return;
@@ -747,6 +781,7 @@ const periodicSync = async () => {
         connectRoom();
         await loadSnapshot();
       }
+      // 房间内全局封禁/禁言通过 globalSocket 订阅 global:public-lobby 广播实时更新，无需轮询。
     } else if (Date.now() - lastProfileFallbackSync >= 5 * 60_000) {
       lastProfileFallbackSync = Date.now();
       await Promise.all([loadDirectory(), loadUsers()]);
@@ -818,6 +853,128 @@ const closeSocket = (clearTimer = true) => {
   reconnectNoticeTimer = undefined;
   if (socket) socket.close();
   socket = null;
+};
+
+// 房间模式下，主界面的 room 通道指向实际对局房间，不再接收 global:public-lobby 的广播。
+// 为此单独订阅 global:public-lobby 的 WebSocket 广播，全局封禁/禁言即可实时生效，
+// 免去 60s 轮询 /api 快照，显著减少对服务端的访问。
+let globalSocket: WebSocket | null = null;
+let globalSocketGeneration = 0;
+let globalLastPongAt = 0;
+let globalSocketReconnectTimer: number | undefined;
+let globalReconnectAttempts = 0;
+let globalModerationEnvelopeIds = new Set<string>();
+let globalHelloReceived = false;
+// 安全网：若 global:public-lobby DO 始终未推送 hello/快照（消息丢失或 DO 异常），
+// 则退化为单次 fetch 快照（最多重试几次），既保证全局封禁/禁言最终一致，又不会回到 60s 轮询。
+let globalHelloFallbackTimer: number | undefined;
+let globalHelloFallbackAttempts = 0;
+
+const shouldConnectGlobalSocket = (): boolean => mode === "room";
+
+const handleGlobalMessage = async (raw: string) => {
+  const message = JSON.parse(raw) as ServerMessage;
+  if (message.type === "pong") {
+    globalLastPongAt = Date.now();
+    return;
+  }
+  if (message.type === "hello" || message.type === "sync") {
+    const verified: SignedEnvelope[] = [];
+    for (const envelope of message.envelopes) {
+      if (await verifyEnvelope(envelope)) verified.push(envelope);
+    }
+    const events = mergePendingGlobalEvents(verified.map((envelope) => envelope.event));
+    prunePendingGlobalEvents(events);
+    globalModerationEnvelopeIds = new Set(events.map((event) => event.id));
+    globalModeration = applyEvents("global", events);
+    globalHelloReceived = true;
+    if (globalHelloFallbackTimer) window.clearTimeout(globalHelloFallbackTimer);
+    globalHelloFallbackTimer = undefined;
+    syncGlobalModerationMessages();
+    notify();
+    return;
+  }
+  if (message.type === "event") {
+    const envelope = message.envelope;
+    if (globalModerationEnvelopeIds.has(envelope.event.id)) return;
+    if (!(await verifyEnvelope(envelope))) return;
+    globalModerationEnvelopeIds.add(envelope.event.id);
+    globalModeration = applyEvent(globalModeration, envelope.event);
+    syncGlobalModerationMessages();
+    notify();
+  }
+};
+
+// 若 global:public-lobby 在数秒内未推送 hello/快照，退化为单次 fetch 快照（最多重试 3 次，
+// 每次间隔 4s），确保全局封禁/禁言最终一致；这不会变成周期性轮询——hello 一到即停止重试。
+const scheduleGlobalHelloFallback = (generation: number) => {
+  if (globalHelloFallbackTimer) window.clearTimeout(globalHelloFallbackTimer);
+  globalHelloFallbackTimer = undefined;
+  globalHelloFallbackAttempts = 0;
+  const tick = () => {
+    if (generation !== globalSocketGeneration) return;
+    if (globalHelloReceived) return;
+    if (globalHelloFallbackAttempts >= 3) return;
+    globalHelloFallbackAttempts += 1;
+    void refreshGlobalModeration().finally(() => {
+      if (generation === globalSocketGeneration && !globalHelloReceived && globalHelloFallbackAttempts < 3) {
+        globalHelloFallbackTimer = window.setTimeout(tick, 4000);
+      }
+    });
+  };
+  globalHelloFallbackTimer = window.setTimeout(tick, 2000);
+};
+
+const connectGlobalModeration = () => {
+  if (!shouldConnectGlobalSocket()) {
+    closeGlobalModeration();
+    return;
+  }
+  if (globalSocket?.readyState === WebSocket.OPEN || globalSocket?.readyState === WebSocket.CONNECTING) return;
+  if (!allowServerRequest()) return;
+  const prev = globalSocket;
+  globalSocket = null;
+  if (prev) prev.close();
+  if (globalSocketReconnectTimer) window.clearTimeout(globalSocketReconnectTimer);
+  globalSocketReconnectTimer = undefined;
+  const generation = ++globalSocketGeneration;
+  const nextSocket = new WebSocket(roomWebSocketUrl("global", "public-lobby"));
+  globalSocket = nextSocket;
+  globalHelloReceived = false;
+  scheduleGlobalHelloFallback(generation);
+  nextSocket.addEventListener("open", () => {
+    if (generation !== globalSocketGeneration) return;
+    globalReconnectAttempts = 0;
+    globalLastPongAt = Date.now();
+  });
+  nextSocket.addEventListener("message", (event) => {
+    if (generation !== globalSocketGeneration) return;
+    globalLastPongAt = Date.now();
+    if (event.data === "pong") return;
+    void handleGlobalMessage(event.data);
+  });
+  nextSocket.addEventListener("close", () => {
+    if (generation !== globalSocketGeneration) return;
+    if (globalSocket === nextSocket) globalSocket = null;
+    if (shouldConnectGlobalSocket()) {
+      const delay = Math.min(30_000, 500 * 2 ** Math.min(globalReconnectAttempts, 6));
+      globalReconnectAttempts += 1;
+      globalSocketReconnectTimer = window.setTimeout(connectGlobalModeration, delay);
+    }
+  });
+  nextSocket.addEventListener("error", () => {
+    if (generation !== globalSocketGeneration) return;
+  });
+};
+
+const closeGlobalModeration = (clearTimer = true) => {
+  globalSocketGeneration += 1;
+  if (clearTimer && globalSocketReconnectTimer) window.clearTimeout(globalSocketReconnectTimer);
+  globalSocketReconnectTimer = undefined;
+  if (globalHelloFallbackTimer) window.clearTimeout(globalHelloFallbackTimer);
+  globalHelloFallbackTimer = undefined;
+  if (globalSocket) globalSocket.close();
+  globalSocket = null;
 };
 
 const connectDirectory = () => {
@@ -1286,6 +1443,9 @@ const refreshGlobalModeration = async () => {
     globalModeration = applyEvents("global", refreshed);
   } catch {
     if (mode === "home" && roomId === "global") globalModeration = state;
+  } finally {
+    // 把影响当前房间参赛者的全局封禁/禁言桥接为房间内系统消息。
+    syncGlobalModerationMessages();
   }
 };
 
@@ -1340,6 +1500,7 @@ const moderateGlobal = async (action: "ban" | "unban" | "mute" | "unmute") => {
   await publishEnvelope("global", "public-lobby", envelope);
   globalModeration = applyEvent(globalModeration, envelope.event);
   if (mode === "home" || mode === "admin") state = globalModeration;
+  syncGlobalModerationMessages();
   setStatus(`已${actionLabel(action)} ${targetName}`);
 };
 
@@ -2642,6 +2803,42 @@ type ChatStreamItem =
   | { type: "system"; id: string; at: number; text: string }
   | { type: "judge"; id: string; at: number; record: DuelState["feed"][number] };
 
+// 当前房间内是否存在某规范化用户名的玩家（用于筛选需要展示的全局封禁/禁言）。
+const playerInRoomByName = (norm: string): boolean =>
+  mode === "room" && Object.values(state.players).some((p) => normalizeName(p.luoguName) === norm);
+
+// 将影响当前房间参赛者的全局封禁/禁言（来自 global:public-lobby）桥接为房间内系统消息。
+// 通过 globalModSeen 去重，状态变化（封禁/解除）时才追加新消息，避免每次刷新重复刷屏。
+const syncGlobalModerationMessages = () => {
+  if (mode !== "room") return;
+  const desired = new Map<string, "ban" | "mute">();
+  for (const key of Object.keys(globalModeration.banned)) {
+    if (playerInRoomByName(key)) desired.set(`ban:${key}`, "ban");
+  }
+  for (const key of Object.keys(globalModeration.muted)) {
+    if (!key.startsWith("name:")) continue;
+    const norm = key.slice(5);
+    if (playerInRoomByName(norm)) desired.set(`mute:${norm}`, "mute");
+  }
+  let changed = false;
+  for (const [key, kind] of desired) {
+    if (globalModSeen.has(key)) continue;
+    const norm = key.slice(key.indexOf(":") + 1);
+    const at = kind === "ban" ? (globalModeration.banned[norm]?.at ?? Date.now()) : Date.now();
+    extraSystemMessages = [...extraSystemMessages, { id: `gmod:${key}:${at}`, at, text: `${norm} 已被全局${kind === "ban" ? "封禁" : "禁言"}` }];
+    globalModSeen.set(key, kind);
+    changed = true;
+  }
+  for (const [key, kind] of [...globalModSeen]) {
+    if (desired.has(key)) continue;
+    const norm = key.slice(key.indexOf(":") + 1);
+    extraSystemMessages = [...extraSystemMessages, { id: `gmod:${key}:${Date.now()}`, at: Date.now(), text: `${norm} 的全局${kind === "ban" ? "封禁" : "禁言"}已解除` }];
+    globalModSeen.delete(key);
+    changed = true;
+  }
+  if (changed) notify();
+};
+
 const chatStreamItems = (): ChatStreamItem[] => {
   const chats = visibleChats(state, identity.id).slice(-20).map((chat) => ({ type: "chat" as const, id: chat.id, at: chat.at, chat }));
   const judges = mode === "room" ? state.feed.slice(0, 20).map((record) => ({
@@ -2650,7 +2847,7 @@ const chatStreamItems = (): ChatStreamItem[] => {
     at: record.at,
     record
   })) : [];
-  const systems = mode === "room" ? state.system.slice(-20).map((message) => ({
+  const systems = mode === "room" ? [...state.system, ...extraSystemMessages].slice(-20).map((message) => ({
     type: "system" as const,
     id: `system:${message.id}`,
     at: message.at,
@@ -3422,7 +3619,13 @@ const submitVJudgeLogin = async (event: Event) => {
     authErrorText = "";
     bootPhase = "ready";
     await registerCurrentUser();
+    await syncExamStatus();
     await refreshGlobalModeration();
+    if (isExamRequired() && !isExamPath()) {
+      location.replace("/exam");
+      notify();
+      return;
+    }
     await enterFromHash();
   } catch (error) {
     authErrorText =
@@ -3631,13 +3834,44 @@ const startExam = (wrongIds?: string[]) => {
 
 const isExamPath = (): boolean => location.pathname.replace(/\/+$/, "") === "/exam";
 
-const isExamPassed = (): boolean => {
+// 考试通过状态：服务端（worker）为权威来源，按规范化洛谷用户名持久化，跨设备一致。
+// 本地 localStorage 仅作为离线/灰度期的降级缓存。examPassedServer 为 null 表示尚未与服务端同步。
+let examPassedServer: boolean | null = null;
+
+const isExamPassedLocal = (): boolean => {
   try { return localStorage.getItem(EXAM_PASSED_KEY) === "1"; } catch { return false; }
 };
 
-const isExamRequired = (): boolean => {
-  if (isExamPassed()) return false;
-  return true;
+const isExamPassed = (): boolean => examPassedServer ?? isExamPassedLocal();
+
+const isExamRequired = (): boolean => !isExamPassed();
+
+// 与服务端同步考试通过状态。已通过则写入本地缓存；本地已通过但服务端未记录（灰度前老用户）
+// 则回写服务端，避免更换设备后重复考试。网络异常时维持本地判断，不阻断使用。
+const syncExamStatus = async (): Promise<void> => {
+  if (!identity?.luoguName) return;
+  try {
+    const passed = await fetchExamStatus(identity.luoguName);
+    const localPassed = isExamPassedLocal();
+    if (passed) {
+      examPassedServer = true;
+      try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
+    } else {
+      examPassedServer = false;
+      if (localPassed) {
+        try {
+          await passExamServer(identity.luoguName);
+          examPassedServer = true;
+        } catch {
+          // 服务端回写失败则维持本地通过状态，避免重复考试。
+          examPassedServer = true;
+        }
+      }
+    }
+  } catch {
+    // 网络异常：保留本地判断，不改变 examPassedServer。
+  }
+  notify();
 };
 
 const examAnsweredCount = (): number => examQuestions.reduce(
@@ -3678,6 +3912,8 @@ const handleExamSubmit = async () => {
 
   if (wrong === 0) {
     try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
+    examPassedServer = true;
+    try { await passExamServer(identity.luoguName); } catch { /* ignore：服务端失败不影响本地通过 */ }
     await Swal.fire({
       title: "考试通过",
       html: "<p>恭喜你通过了 VJudge Duel 规则考试，现在可以正常使用了。</p>",
@@ -3702,6 +3938,19 @@ const handleExamSubmit = async () => {
     confirmButtonText: "查看错题",
     customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm" }
   });
+};
+
+// 管理员豁免：点击即视为通过规则考试（服务端持久化），仅管理员可见/可用。
+const adminSkipExam = async () => {
+  if (!isAdmin()) return;
+  try {
+    await passExamServer(identity.luoguName);
+    examPassedServer = true;
+    try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
+    location.href = "/";
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "跳过考试失败", "error");
+  }
 };
 
 const selectExamOption = (optionIndex: number) => {
@@ -3800,6 +4049,24 @@ const ExamReviewPage = () => {
 const ExamPage = () => {
   const total = examQuestions.length;
   const question = examQuestions[examCurrentIndex];
+  if (isExamPassed()) {
+    return (
+      <main class="exam-grid exam-grid-single">
+        <section class="command-panel exam-brief">
+          <div class="section-head">
+            <Shield size={18} />
+            <div>
+              <h1>规则考试</h1>
+              <p>你已通过规则考试，可正常使用 VJudge Duel。</p>
+            </div>
+          </div>
+          <div class="announcement-actions">
+            <button type="button" class="rules-ticket" onClick={() => { location.href = "/"; }}>进入主页</button>
+          </div>
+        </section>
+      </main>
+    );
+  }
   if (examReviewing) return <ExamReviewPage />;
   if (examSubmitted || !question) {
     return (
@@ -3847,6 +4114,11 @@ const ExamPage = () => {
             <button type="button" class="rules-ticket" onClick={() => window.open(EXAM_RULES_URL, "_blank")}>
               打开规则
             </button>
+            {isAdmin() ? (
+              <button type="button" class="rules-ticket danger" onClick={() => void adminSkipExam()}>
+                管理员跳过考试
+              </button>
+            ) : null}
           </div>
         </div>
 

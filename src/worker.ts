@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject } from "cloudflare:workers";
-import { applyEvent, applyEvents, canStart, createInitialState, isTeam, privateChatViolation } from "./domain";
+import { applyEvent, applyEvents, canStart, createInitialState, isAdminName, isTeam, privateChatViolation } from "./domain";
 import type { DuelEvent, FeedRecord, Problem, SignedEnvelope } from "./types";
 
 type Env = {
@@ -72,6 +72,7 @@ export class DuelRoom extends DurableObject<Env> {
   private listingsCache: Map<string, RoomListing> | null = null;
   private usersCache: Map<string, UserRecord> | null = null;
   private bannedUsersCache: Set<string> | null = null;
+  private examPassedCache: Set<string> | null = null;
   private processedResultsCache: Set<string> | null = null;
   private actorWriteWindow = new Map<string, number[]>();
   private directoryObject: boolean | null = null;
@@ -117,6 +118,12 @@ export class DuelRoom extends DurableObject<Env> {
         )
       `);
       this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS exam_passed (
+          name_key TEXT PRIMARY KEY,
+          passed_at INTEGER NOT NULL
+        )
+      `);
+      this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS active_players (
           name_key TEXT PRIMARY KEY,
           room_id TEXT NOT NULL,
@@ -149,6 +156,8 @@ export class DuelRoom extends DurableObject<Env> {
     if (url.pathname.endsWith("/active-player")) return this.handleActivePlayer(request);
     if (url.pathname.endsWith("/low-room-limit")) return this.handleLowRoomLimit(request);
     if (url.pathname.endsWith("/users")) return this.handleUsers(request);
+    if (url.pathname.endsWith("/exam/status")) return this.handleExamStatus(request);
+    if (url.pathname.endsWith("/exam/pass") && request.method === "POST") return this.handleExamPass(request);
     if (url.pathname.endsWith("/clear-all")) return this.handleClearAll(request);
     if (url.pathname.endsWith("/clear-runtime-data")) return this.handleClearRuntimeData(request);
     if (url.pathname.endsWith("/clear-global-chat")) return this.handleClearGlobalChat(request);
@@ -408,6 +417,11 @@ export class DuelRoom extends DurableObject<Env> {
       } else if (savedClose) {
         this.broadcast({ type: "event", envelope: closeEnvelope });
       }
+    }
+    // 全局封禁/禁言同步：房间内管理员/房主的封禁与禁言，跨房间转发到 global 房间，
+    // 使"封禁和禁言都是全局的"在实时状态上真正生效（仅转发实际封禁与管理员禁言）。
+    if (event.roomId !== "global" && (event.type === "player.kicked" || event.type === "player.muted" || event.type === "player.unmuted" || event.type === "player.unkicked")) {
+      await this.propagateGlobalModeration(event);
     }
     if (claimName && !isPlayingSeat(this.cachedState.players[event.actorId]?.team)) {
       await this.releaseActivePlayer(claimName, event.roomId);
@@ -717,6 +731,52 @@ export class DuelRoom extends DurableObject<Env> {
     return Response.json({ users: this.listUsers() }, { headers: cacheHeaders(60, 24 * 60 * 60) });
   }
 
+  // 规则考试通过状态：由 worker 持久化（按规范化洛谷用户名），避免用户更换设备后重新考试。
+  private handleExamStatus(request: Request): Response {
+    if (request.method !== "GET") return jsonError("method not allowed", 405);
+    const user = (new URL(request.url)).searchParams.get("user")?.trim() ?? "";
+    if (!user) return jsonError("missing user", 400);
+    const passed = this.readExamPassed(normalizeName(user));
+    return Response.json({ passed }, { headers: { "cache-control": "no-store" } });
+  }
+
+  private async handleExamPass(request: Request): Promise<Response> {
+    if (request.method !== "POST") return jsonError("method not allowed", 405);
+    const body = await (request.json() as unknown as Promise<{ user?: string }>).catch(() => null);
+    const name = (body?.user ?? "").trim();
+    if (!name) return jsonError("missing user", 400);
+    this.writeExamPassed(normalizeName(name));
+    return Response.json({ ok: true });
+  }
+
+  private readExamPassed(nameKey: string): boolean {
+    this.hydrateExamPassed();
+    return this.examPassedCache!.has(nameKey);
+  }
+
+  private writeExamPassed(nameKey: string): void {
+    this.hydrateExamPassed();
+    this.examPassedCache!.add(nameKey);
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO exam_passed (name_key, passed_at) VALUES (?, ?)",
+      nameKey,
+      Date.now()
+    );
+    this.writeSnapshot("exam-passed", [...this.examPassedCache!]);
+  }
+
+  private hydrateExamPassed(): void {
+    if (this.examPassedCache) return;
+    const snapshot = this.readSnapshot<string[]>("exam-passed");
+    if (snapshot) {
+      this.examPassedCache = new Set(snapshot);
+      return;
+    }
+    const rows = this.ctx.storage.sql.exec<{ name_key: string }>("SELECT name_key FROM exam_passed").toArray();
+    this.examPassedCache = new Set(rows.map((row) => row.name_key));
+    this.writeSnapshot("exam-passed", [...this.examPassedCache]);
+  }
+
   private async handleUser(request: Request, rawName: string): Promise<Response> {
     const name = rawName.trim();
     if (!name) return jsonError("missing name", 400);
@@ -998,6 +1058,45 @@ export class DuelRoom extends DurableObject<Env> {
     }
   }
 
+  // 把房间内的封禁/禁言事件同步到全局 moderation 房间（global:public-lobby），
+  // 使其真正"全局化"：被房间内管理员封禁的用户在所有房间实时受限，主页遮罩也会显示。
+  // 仅转发实际封禁（state.banned 已写入，准备房移除观赛者不算）与管理员禁言/解禁言。
+  private async propagateGlobalModeration(
+    event: Extract<DuelEvent, { type: "player.kicked" | "player.muted" | "player.unmuted" | "player.unkicked" }>
+  ): Promise<void> {
+    try {
+      const now = Date.now();
+      const globalName = "global:public-lobby";
+      const postToGlobal = async (envelope: SignedEnvelope) => {
+        const response = await this.env.DUEL_ROOM.getByName(globalName).fetch("https://duel.internal/event", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ envelope })
+        });
+        if (!response.ok) throw new Error(`global moderation returned ${response.status}`);
+      };
+      if (event.type === "player.kicked") {
+        if (!this.cachedState.banned[normalizeName(event.targetName || "")]) return;
+        await postToGlobal(await systemKickEnvelope("global", now, now, `name:${normalizeName(event.targetName || "")}`, event.targetName || "", event.reason || "管理员封禁"));
+        return;
+      }
+      if (event.type === "player.unkicked") {
+        await postToGlobal(await systemUnkickEnvelope("global", now, now, event.targetName));
+        return;
+      }
+      // 禁言/解禁言：仅管理员操作全局化（房主房间内禁言保持房间级）。
+      const actorName = this.cachedState.players[event.actorId]?.luoguName ?? "";
+      if (!isAdminName(normalizeName(actorName))) return;
+      if (event.type === "player.muted") {
+        await postToGlobal(await systemMuteEnvelope("global", now, now, `name:${normalizeName(event.targetName || "")}`, event.targetName || ""));
+      } else if (event.type === "player.unmuted") {
+        await postToGlobal(await systemUnmuteEnvelope("global", now, now, `name:${normalizeName(event.targetName || "")}`, event.targetName || ""));
+      }
+    } catch {
+      // 全局同步失败不影响本房间事件落地。
+    }
+  }
+
   private readUser(name: string): UserRecord | null {
     this.hydrateUsers();
     const key = normalizeName(name);
@@ -1254,6 +1353,15 @@ export default {
     if (url.pathname === "/api/rooms/ws") return env.DUEL_ROOM.getByName("__directory").fetch(new Request("https://duel.internal/directory/ws", request));
     if (url.pathname === "/api/users" && request.method === "GET") {
       return directoryJsonResponse(request, env, "https://duel.internal/users");
+    }
+    // 规则考试通过状态（按洛谷用户名持久化于 __directory，跨设备生效）。
+    if (url.pathname === "/api/exam/status" && request.method === "GET") {
+      const user = url.searchParams.get("user")?.trim() ?? "";
+      if (!user) return jsonError("missing user", 400);
+      return env.DUEL_ROOM.getByName("__directory").fetch(new Request(`https://duel.internal/exam/status?user=${encodeURIComponent(user)}`, request));
+    }
+    if (url.pathname === "/api/exam/pass" && request.method === "POST") {
+      return env.DUEL_ROOM.getByName("__directory").fetch(new Request("https://duel.internal/exam/pass", request));
     }
     if (url.pathname === "/api/admin/clear-all" && request.method === "POST") {
       const actor = normalizeName(request.headers.get("x-admin-name") || "");
@@ -1657,14 +1765,16 @@ const applyCheatCompensation = (user: UserRecord): UserRecord => ({
   updatedAt: Date.now()
 });
 
-// 从事件流推导作弊者名称：room.closed 原因含"作弊"，取其之前最后一条 system 踢人事件的 targetName。
+// 从事件流推导作弊者名称：room.closed 原因含"作弊"，取其之前最后一条踢人事件的 targetName。
+// 注意：既包含 system 作弊自动封禁（detectCheatAndBan 产生），也包含对决进行中管理员手动封禁
+// （player.kicked，system 为 false）——两者都应触发自动封禁系统（Rating 清零 + 全局封禁 + 其余 +10）。
 const deriveCheatBannedName = (envelopes: SignedEnvelope[]): string | null => {
   const closeEvent = envelopes.find((item) => item.event.type === "room.closed" && (item.event.reason ?? "").includes("作弊"))?.event as Extract<DuelEvent, { type: "room.closed" }> | undefined;
   if (!closeEvent) return null;
   let cheater: string | null = null;
   for (const item of envelopes) {
     const event = item.event;
-    if (event.type === "player.kicked" && event.system && event.issuedAt <= closeEvent.issuedAt) {
+    if (event.type === "player.kicked" && event.issuedAt <= closeEvent.issuedAt) {
       cheater = event.targetName ?? cheater;
     }
   }
@@ -1748,6 +1858,64 @@ const systemKickEnvelope = async (roomId: string, lamport: number, issuedAt: num
     reason,
     system: true,
     by: "System"
+  };
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, textBytes(stableStringify(event)));
+  return { publicKey, event, signature: btoa(String.fromCharCode(...new Uint8Array(signature))) };
+};
+
+// 以下 system 信封用于把房间内的封禁/禁言同步到全局 moderation 房间，
+// 使"封禁和禁言都是全局的"在实时状态上生效（全局房间已支持 system 分支）。
+const systemMuteEnvelope = async (roomId: string, lamport: number, issuedAt: number, targetId: string, targetName: string): Promise<SignedEnvelope> => {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const actorId = await keyId(publicKey);
+  const event: DuelEvent = {
+    type: "player.muted",
+    roomId,
+    actorId,
+    id: crypto.randomUUID(),
+    lamport,
+    issuedAt,
+    targetId,
+    targetName,
+    system: true
+  };
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, textBytes(stableStringify(event)));
+  return { publicKey, event, signature: btoa(String.fromCharCode(...new Uint8Array(signature))) };
+};
+
+const systemUnmuteEnvelope = async (roomId: string, lamport: number, issuedAt: number, targetId: string, targetName: string): Promise<SignedEnvelope> => {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const actorId = await keyId(publicKey);
+  const event: DuelEvent = {
+    type: "player.unmuted",
+    roomId,
+    actorId,
+    id: crypto.randomUUID(),
+    lamport,
+    issuedAt,
+    targetId,
+    targetName,
+    system: true
+  };
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, textBytes(stableStringify(event)));
+  return { publicKey, event, signature: btoa(String.fromCharCode(...new Uint8Array(signature))) };
+};
+
+const systemUnkickEnvelope = async (roomId: string, lamport: number, issuedAt: number, targetName: string): Promise<SignedEnvelope> => {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const actorId = await keyId(publicKey);
+  const event: DuelEvent = {
+    type: "player.unkicked",
+    roomId,
+    actorId,
+    id: crypto.randomUUID(),
+    lamport,
+    issuedAt,
+    targetName,
+    system: true
   };
   const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, textBytes(stableStringify(event)));
   return { publicKey, event, signature: btoa(String.fromCharCode(...new Uint8Array(signature))) };
