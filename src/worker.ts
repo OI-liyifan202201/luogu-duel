@@ -437,6 +437,13 @@ export class DuelRoom extends DurableObject<Env> {
       } else if (this.cachedState.phase !== "lobby") {
         await this.ctx.storage.deleteAlarm();
       }
+    } else {
+      // 全局房间此前没有定时清理闹钟（expireStaleLobby 对 global 直接 return），导致事件无限累积。
+      // 这里为全局房间引导一个每日压缩闹钟；若已存在（含历史遗留的过期闹钟）则交给 alarm() 自愈续期。
+      const existingAlarm = await this.ctx.storage.getAlarm();
+      if (existingAlarm === null) {
+        await this.ctx.storage.setAlarm(Date.now() + DIRECTORY_PRUNE_INTERVAL_MS);
+      }
     }
     if (event.roomId !== "global" && event.type === "player.readyChanged" && canStart(this.cachedState)) {
       // The last ready event must reach clients before the generated start event.
@@ -527,7 +534,46 @@ export class DuelRoom extends DurableObject<Env> {
       this.broadcastDirectory();
       return;
     }
+    // 全局 moderation 房间（global:public-lobby）需要周期性压缩，清理累积的旁观者进入/聊天等临时事件。
+    this.hydrateEvents();
+    if (this.cachedState.roomId === "global") {
+      await this.compactGlobalModeration();
+      await this.ctx.storage.setAlarm(Date.now() + DIRECTORY_PRUNE_INTERVAL_MS);
+      return;
+    }
     await this.expireStaleLobby();
+  }
+
+  // 全局 moderation 房间会持续累积 player.joined（旁观者进入大厅）、chat.sent（大厅聊天）等临时事件。
+  // 这些"古早内容"此前没有任何自动清理（expireStaleLobby 对 global 直接 return），导致事件无限增长。
+  // 这里按 DATA_RETENTION_MS 保留期清理临时事件，同时永久保留定义 globalModeration 权威状态的
+  // 封禁/禁言事件（player.kicked/muted/unmuted/unkicked），保证全局封禁与禁言不丢失。
+  private async compactGlobalModeration(): Promise<void> {
+    this.hydrateEvents();
+    if (this.eventsCache!.length === 0) return;
+    const cutoff = Date.now() - DATA_RETENTION_MS;
+    const moderationTypes = new Set(["player.kicked", "player.muted", "player.unmuted", "player.unkicked"]);
+    const retained = this.eventsCache!.filter((item) => moderationTypes.has(item.event.type) || item.event.issuedAt >= cutoff);
+    if (retained.length === this.eventsCache!.length) return;
+    this.ctx.storage.sql.exec("DELETE FROM events");
+    this.ctx.storage.sql.exec("DELETE FROM snapshots WHERE snapshot_key = 'events'");
+    for (const envelope of retained) {
+      const event = envelope.event;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO events (id, room_id, issued_at, lamport, envelope) VALUES (?, ?, ?, ?, ?)",
+        event.id,
+        event.roomId,
+        event.issuedAt,
+        event.lamport,
+        JSON.stringify(envelope)
+      );
+    }
+    this.eventsCache = retained;
+    this.eventIds = new Set(retained.map((item) => item.event.id));
+    this.firstEvent = retained[0]?.event ?? null;
+    this.cachedState = retained.length ? applyEvents("global", retained.map((item) => item.event)) : createInitialState("global");
+    this.writeSnapshot("events", retained);
+    this.broadcast({ type: "sync", envelopes: retained });
   }
 
   private async expireStaleLobby(): Promise<void> {
@@ -905,12 +951,16 @@ export class DuelRoom extends DurableObject<Env> {
   private activeGlobalBanEvents(): SignedEnvelope[] {
     const moderation = applyEvents("global", this.eventsCache!.map((item) => item.event));
     const activeBans = new Set(Object.keys(moderation.banned));
-    const banEvents = this.eventsCache!.filter((item) =>
-      item.event.type === "player.kicked" && activeBans.has(normalizeName(item.event.targetName || ""))
+    const banActors = new Set(
+      this.eventsCache!
+        .filter((item) => item.event.type === "player.kicked" && activeBans.has(normalizeName(item.event.targetName || "")))
+        .map((item) => item.event.actorId)
     );
-    const banActors = new Set(banEvents.map((item) => item.event.actorId));
+    // 保留所有封禁/禁言事件（定义 globalModeration 权威状态），以及当前被封禁者的进入事件。
+    const moderationTypes = new Set(["player.kicked", "player.muted", "player.unmuted", "player.unkicked"]);
     return this.eventsCache!.filter((item) =>
-      (item.event.type === "player.joined" && banActors.has(item.event.actorId)) || banEvents.includes(item)
+      moderationTypes.has(item.event.type) ||
+      (item.event.type === "player.joined" && banActors.has(item.event.actorId))
     );
   }
 
