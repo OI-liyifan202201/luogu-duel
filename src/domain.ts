@@ -459,7 +459,9 @@ const kickPlayer = (state: DuelState, event: Extract<DuelEvent, { type: "player.
   const target = resolvedTargetId ? state.players[resolvedTargetId] : undefined;
   const finalTargetName = target?.luoguName || targetName || targetId;
   if (system) {
-    if (state.hostId === resolvedTargetId) return;
+    // 房主保护仅对真实比赛房间生效：global 大厅的 hostId 只是"历史上第一个进入大厅的人"，
+    // 若目标恰好是该用户，全局封禁会被静默丢弃（表现为管理面板点封禁无反应）。
+    if (state.roomId !== "global" && resolvedTargetId && state.hostId === resolvedTargetId) return;
     const record: ModerationRecord = {
       reason: `${reason.trim() || "系统封禁"}`,
       by: by ?? "System",
@@ -478,7 +480,9 @@ const kickPlayer = (state: DuelState, event: Extract<DuelEvent, { type: "player.
     return;
   }
   const actor = state.players[actorId];
-  if (!actor || state.hostId === resolvedTargetId || isAdminName(finalTargetName)) return;
+  // global 大厅不设房主保护（hostId 无实际意义），且 resolvedTargetId 可能为 undefined，
+  // `undefined === undefined` 会把封禁静默吞掉。
+  if (!actor || (state.roomId !== "global" && resolvedTargetId && state.hostId === resolvedTargetId) || isAdminName(finalTargetName)) return;
   const lobbyKick = state.phase === "lobby" && (state.hostId === actorId || isAdminName(actor.luoguName));
   if (!lobbyKick && !isAdminName(actor.luoguName)) return;
   if (lobbyKick) {

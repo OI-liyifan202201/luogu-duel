@@ -71,7 +71,7 @@ import { cachedProblemCount, defaultRatios, difficultyMeta, parseCustomProblems,
 import { loadVJudgeSession, logoutVJudgeSession, verifyVJudgeLogin, type VJudgeLoginMethod, type VJudgeSession } from "./oauth";
 import { allowServerRequest, clearRoomDraft, directoryWebSocketUrl, fetchExamStatus, fetchLowRoomAvailability, fetchRooms, fetchSnapshot, fetchUserRecord, fetchUsers, passExamServer, publishEnvelope, roomWebSocketUrl, saveUserRecord, setServerRequestWarningHandler, updateUserRating, type RoomListing, type ServerMessage, type UserRecord } from "./realtimeStore";
 import { fetchVJudgeRecords } from "./vjudge";
-import { AdminPlayersSkeleton, AdminRoomsSkeleton, BootScreen, ChatSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, SkeletonRows } from "./loadingViews";
+import { AdminPlayersSkeleton, AdminRoomsSkeleton, AdminSkeleton, BootScreen, ChatSkeleton, HomeSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, RoomSkeleton, SkeletonShell } from "./loadingViews";
 import type { ChatMessage, DuelEvent, DuelState, Player, Problem, Seat, SignedEnvelope, VoteKind } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -2035,6 +2035,16 @@ const judgeProblem = async (problem: Problem) => {
   }
 };
 
+// boot 阶段 mode 尚未由 enterFromHash 确定（永远是初始值），
+// 这里直接从 URL 推导目标页面，用于渲染与之一致的加载骨架。
+const predictedBootMode = (): ViewMode => {
+  if (isExamPath()) return "exam";
+  if (profileNameFromPath()) return "profile";
+  const params = new URLSearchParams(location.hash.slice(1));
+  if (params.get("admin") === "1") return "admin";
+  return params.get("room") ? "room" : "home";
+};
+
 const App = () => {
   if (temporaryBanUntil > Date.now()) return <TemporaryBlockOverlay />;
   // 考试门禁：未通过考试者一律强制重定向到 /exam，任何渲染路径都不泄露主页/房间/管理页内容。
@@ -2044,7 +2054,18 @@ const App = () => {
     return <BootScreen leaving={false} />;
   }
   if (bootPhase === "loading") {
-    return mode === "profile" ? <ProfileSkeleton /> : <BootScreen leaving={false} />;
+    // 按 URL 预测目标页面，渲染与之一致的骨架（含顶栏骨架），
+    // 避免所有页面都显示登录卡骨架、以及个人页骨架缺顶栏导致的布局跳动。
+    const target = predictedBootMode();
+    if (target === "exam") return <BootScreen leaving={false} />;
+    return (
+      <SkeletonShell>
+        {target === "profile" ? <ProfileSkeleton />
+          : target === "admin" ? <AdminSkeleton />
+            : target === "room" ? <RoomSkeleton />
+              : <HomeSkeleton />}
+      </SkeletonShell>
+    );
   }
   const bootOverlay = bootScreenVisible ? <BootScreen leaving={bootScreenLeaving} /> : null;
   if (bootPhase === "auth-error") {
@@ -2187,14 +2208,7 @@ const Home = () => (
 );
 
 const Room = () => {
-  if (!lastRoomLiveStateAt && !state.problems.length) return (
-    <main class="room-grid room-loading">
-      <div class="skeleton-match-island"><i /><span /><b /></div>
-      <div class="panel skeleton-panel"><div class="sk-panel-head"><i /><b /></div><SkeletonRows count={4} compact /></div>
-      <div class="panel skeleton-panel"><div class="sk-panel-head"><i /><b /></div><SkeletonRows count={5} compact /></div>
-      <div class="panel skeleton-panel"><div class="sk-panel-head"><i /><b /></div><SkeletonRows count={6} compact /></div>
-    </main>
-  );
+  if (!lastRoomLiveStateAt && !state.problems.length) return <RoomSkeleton />;
   return <main class="room-grid">
     <MatchIsland />
 
@@ -3674,8 +3688,16 @@ const MatchIsland = () => {
   const total = Math.max(1, state.problems.reduce((sum, problem) => sum + problem.score, 0));
   const threshold = winThreshold(state);
   return (
-    <aside class={`match-island${draft.matchIslandPinned ? " pinned" : ""}`} onClick={() => { draft.matchIslandPinned = !draft.matchIslandPinned; notify(); }}>
-      <div class="match-island-summary">
+    <aside class={`match-island${draft.matchIslandPinned ? " pinned" : ""}`}>
+      {/* 仅顶部 summary 条响应点击切换固定，避免点击花名册/详情内容误触取消固定。 */}
+      <div class="match-island-summary" role="button" tabIndex={0} title={draft.matchIslandPinned ? "取消固定" : "固定比赛面板"}
+        onClick={() => { draft.matchIslandPinned = !draft.matchIslandPinned; notify(); }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          draft.matchIslandPinned = !draft.matchIslandPinned;
+          notify();
+        }}>
         <time>{state.phase === "lobby" ? "准备中" : formatMatchClock()}</time>
         <span class="island-duel" aria-label={`红方 ${red} 分，蓝方 ${blue} 分，胜利线 ${threshold}`}>
           <b class="island-red-score">{red}</b>

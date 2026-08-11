@@ -853,7 +853,8 @@ body .duel-swal-deny {
 /* Reuse the loaded profile's structure so its grid tracks and breakpoints
    cannot drift away from the loading state. */
 .profile-loading-skeleton { animation: none; }
-.profile-loading-skeleton .skeleton-shape {
+/* 全局骨架块：所有加载骨架（顶栏/主页/房间/管理页/个人页）共用的 shimmer 单元。 */
+.skeleton-shape {
   display: block;
   overflow: hidden;
   border-radius: 5px;
@@ -945,6 +946,46 @@ body .duel-swal-deny {
   .profile-skeleton-tabs i { flex: 1; min-width: 0; }
   .room-grid.room-loading .skeleton-match-island span { display: none; }
 }
+
+/* ===== 整页加载骨架：顶栏 + 各页面骨架 ===== */
+.skeleton-shell { min-height: 100vh; }
+.skeleton-topbar { pointer-events: none; user-select: none; }
+.skeleton-topbar .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.skeleton-topbar .brand .sk-logo { width: 25px; height: 25px; border-radius: 8px; flex: none; }
+.skeleton-topbar .brand b.skeleton-shape { width: 104px; height: 16px; }
+.skeleton-topbar .brand em.skeleton-shape { width: 72px; height: 11px; }
+.skeleton-topbar .status-pill { justify-self: center; }
+.skeleton-topbar .status-pill .skeleton-shape { width: min(180px, 100%); height: 15px; }
+.skeleton-topbar .session .sk-icon-btn { width: 34px; height: 34px; border-radius: 10px; }
+.skeleton-topbar .session .sk-user { width: 118px; height: 40px; border-radius: 12px; }
+@media (max-width: 900px) {
+  .skeleton-topbar .brand em.skeleton-shape,
+  .skeleton-topbar .status-pill { display: none; }
+}
+
+/* 主页骨架：复用 home-grid 真实布局类，仅填充骨架块。 */
+.home-skeleton .section-head .sk-icon { width: 22px; height: 22px; border-radius: 7px; flex: none; }
+.home-skeleton .section-head .sk-title { width: 190px; height: 22px; }
+.home-skeleton .section-head .sk-h2 { width: 96px; height: 17px; }
+.home-skeleton .section-head .sk-sub { width: 230px; height: 12px; margin-top: 8px; }
+.home-skeleton .section-head .sk-btn { width: 108px; height: 36px; border-radius: 10px; margin-left: auto; }
+.home-skeleton .home-announcement { display: grid; gap: 12px; align-content: start; }
+.home-skeleton .home-announcement b.skeleton-shape { width: 55%; height: 15px; }
+.home-skeleton .home-announcement span.skeleton-shape { width: 100%; height: 12px; }
+.home-skeleton .home-announcement span.skeleton-shape:nth-of-type(2) { width: 88%; }
+.home-skeleton .home-announcement span.skeleton-shape:nth-of-type(3) { width: 64%; }
+.home-skeleton .home-tabs i { display: block; height: 34px; border-radius: 9px; }
+
+/* 管理页骨架：复用 admin 真实布局类。 */
+.admin-skeleton .admin-page-head .sk-icon { width: 22px; height: 22px; border-radius: 7px; flex: none; }
+.admin-skeleton .admin-page-head .sk-title { width: 120px; height: 19px; }
+.admin-skeleton .admin-page-head .sk-sub { width: 160px; height: 11px; margin-top: 6px; }
+.admin-skeleton .admin-stats strong.skeleton-shape { width: 30px; height: 21px; }
+.admin-skeleton .admin-stats span.skeleton-shape { width: 36px; height: 10px; }
+.admin-skeleton .admin-page-head > .sk-btn { width: 84px; height: 36px; border-radius: 10px; }
+.admin-skeleton .admin-section-head .sk-h2 { width: 96px; height: 18px; }
+.admin-skeleton .admin-section-head .sk-sub { width: 130px; height: 11px; margin-top: 6px; }
+
 
 .session-user {
   min-height: 40px;
