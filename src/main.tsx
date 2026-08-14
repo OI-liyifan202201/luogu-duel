@@ -46,8 +46,7 @@ import {
   Users,
   Volume2,
   VolumeX,
-  X,
-  Zap
+  X
 } from "lucide-preact";
 import {
   applyEvent,
@@ -71,7 +70,7 @@ import { cachedProblemCount, defaultRatios, difficultyMeta, parseCustomProblems,
 import { loadVJudgeSession, logoutVJudgeSession, verifyVJudgeLogin, type VJudgeLoginMethod, type VJudgeSession } from "./oauth";
 import { allowServerRequest, clearRoomDraft, directoryWebSocketUrl, fetchExamStatus, fetchLowRoomAvailability, fetchRooms, fetchSnapshot, fetchUserRecord, fetchUsers, passExamServer, publishEnvelope, roomWebSocketUrl, saveUserRecord, setServerRequestWarningHandler, updateUserRating, type RoomListing, type ServerMessage, type UserRecord } from "./realtimeStore";
 import { fetchVJudgeRecords } from "./vjudge";
-import { AdminPlayersSkeleton, AdminRoomsSkeleton, AdminSkeleton, BootScreen, ChatSkeleton, HomeSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, RoomSkeleton, SkeletonShell } from "./loadingViews";
+import { AdminPlayersSkeleton, AdminRoomsSkeleton, AdminSkeleton, ChatSkeleton, HomeSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, RoomSkeleton, SkeletonShell } from "./loadingViews";
 import type { ChatMessage, DuelEvent, DuelState, Player, Problem, Seat, SignedEnvelope, VoteKind } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -360,6 +359,44 @@ const setStatus = (text: string, tone: "info" | "error" = "info") => {
   notify();
 };
 
+// 危险操作（投降 / 关房 / 禁言等）二次确认，避免误触。
+const confirmDanger = async (title: string, html: string): Promise<boolean> => {
+  const result = await Swal.fire({
+    title,
+    html,
+    icon: "warning",
+    showCancelButton: true,
+    confirmButtonText: "确认",
+    cancelButtonText: "取消",
+    customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm duel-swal-danger", cancelButton: "duel-swal-cancel" }
+  });
+  return result.isConfirmed;
+};
+
+// 洛谷题库较大：默认走 Cloudflare 代理，失败时询问用户是否直接从洛谷开放平台下载（绕过 Cloudflare）。
+const confirmLuoguDirectDownload = (): Promise<boolean> =>
+  Swal.fire({
+    icon: "question",
+    title: "洛谷题库下载缓慢",
+    html: "从 Cloudflare 代理下载洛谷题库失败或超时（60 秒）。是否改为直接从洛谷开放平台下载（绕过 Cloudflare）？",
+    showCancelButton: true,
+    confirmButtonText: "从洛谷下载",
+    cancelButtonText: "取消",
+    customClass: { popup: "duel-swal", confirmButton: "duel-swal-confirm", cancelButton: "duel-swal-cancel" }
+  }).then((result) => result.isConfirmed);
+
+// 题库准备进度弹窗（创建/恢复房间时复用，封禁确认后可重新打开以继续显示进度）。
+const openBankLoadingModal = (): void => {
+  Swal.fire({
+    title: "正在准备题库",
+    html: problemBankProgressHtml(),
+    allowEscapeKey: false,
+    allowOutsideClick: false,
+    showConfirmButton: false,
+    customClass: { popup: "duel-swal bank-loading-swal" }
+  });
+};
+
 const finishBootScreen = () => {
   if (!bootScreenVisible || bootScreenLeaving) return;
   bootScreenLeaving = true;
@@ -551,12 +588,12 @@ const loadDirectory = async () => {
     await refreshGlobalModeration();
     if (mode === "home") state = globalModeration;
     const remoteRooms = await fetchRooms();
-    if (!directoryLiveSnapshotReceived || Date.now() - lastDirectoryLiveAt >= 20_000) {
-      rooms = remoteRooms;
-      writeDirectoryCache(rooms);
-      directoryLiveSnapshotReceived = true;
-      lastDirectoryLiveAt = Date.now();
-    }
+    // HTTP 请求使用 no-store，返回的是目录 DO 的权威最新数据。无论 WebSocket 快照是否“新鲜”，
+    // 都以服务端兜底数据为准，避免房间已平局/结束后列表仍停留在“进行中”的陈旧状态。
+    rooms = remoteRooms;
+    writeDirectoryCache(rooms);
+    directoryLiveSnapshotReceived = true;
+    lastDirectoryLiveAt = Date.now();
     statusTone = "info";
     statusText = "大厅在线";
   } catch (error) {
@@ -665,6 +702,14 @@ const openThemeEditor = async () => {
     denyButtonText: "重置默认",
     customClass: { popup: "duel-swal theme-editor-swal", confirmButton: "duel-swal-confirm", cancelButton: "duel-swal-cancel", denyButton: "duel-swal-deny" },
     didOpen: () => {
+      // 修复保存按钮悬停上浮时的抽搐：把 hover 判断移到稳定的父级包裹框（不随按钮上浮），
+      // 按钮自身不再作为 hover 目标，从而避免上浮后指针脱离按钮、hover 反复触发导致的循环抖动。
+      document.querySelectorAll<HTMLButtonElement>(".theme-editor-swal .swal2-actions button").forEach((btn) => {
+        const wrap = document.createElement("span");
+        wrap.className = "swal-btn-wrap";
+        btn.parentNode?.insertBefore(wrap, btn);
+        wrap.appendChild(btn);
+      });
       const get = (id: string) => document.getElementById(id) as HTMLInputElement;
       const applyNow = () => {
         const colorHex = get("te-color")?.value || "#3fb98c";
@@ -1203,14 +1248,34 @@ const emit = async (event: DuelEvent) => {
 const isCheatClose = (): boolean => state.phase === "finished" && Boolean(state.closed?.reason?.includes("作弊"));
 
 const cheaterDisplayName = (): string => {
-  const bannedKeys = Object.keys(state.banned);
-  if (!bannedKeys.length) return "";
+  // 优先从已落地的 state.banned 取（最权威）。
   const player = Object.values(state.players).find((p) => state.banned[normalizeName(p.luoguName)]);
-  return player?.luoguName ?? bannedKeys[0];
+  if (player?.luoguName) return player.luoguName;
+  const bannedKeys = Object.keys(state.banned);
+  if (bannedKeys[0]) return bannedKeys[0];
+  // 兜底：封禁事件可能晚于 finish 到达，state.banned 此刻尚未更新，用本地已捕获的作弊者名。
+  if (knownCheaterName) return knownCheaterName;
+  return "";
 };
 
 const pushToastsForEvent = (event: DuelEvent, previousPhase: DuelState["phase"], previousSystemCount: number) => {
   if (mode !== "room" && event.roomId !== "global") return;
+  // 新对局开始：清空本地的作弊方标记（避免上一场残留）。
+  if (event.type === "game.started") {
+    localCheaterName = null;
+    knownCheaterName = null;
+  }
+  // 自动检测作弊会把“系统封禁（踢人）”事件广播给房间内所有人。
+  // 立即在本地记下作弊者姓名——这个信号与事件同到，不依赖 state.banned 的最终传播时机
+  // （state.banned 可能因事件到达顺序而尚未更新，导致弹窗显示“未知玩家”）。
+  if (event.type === "player.kicked" && event.system) {
+    const targetName = event.targetName || state.players[event.targetId]?.luoguName || "";
+    if (targetName) knownCheaterName = targetName;
+    const normalizedTarget = normalizeName(targetName);
+    if (normalizedTarget && normalizedTarget === normalizeName(identity?.luoguName ?? "")) {
+      localCheaterName = identity?.luoguName ?? event.targetName ?? null;
+    }
+  }
   if (event.type === "game.started") {
     const elapsed = Date.now() - (state.startedAt ?? event.issuedAt);
     if (elapsed >= 0 && elapsed < 5_000) {
@@ -1221,7 +1286,7 @@ const pushToastsForEvent = (event: DuelEvent, previousPhase: DuelState["phase"],
     // 作弊导致的比赛终止：作弊者看到封禁弹窗，其余参赛者看到终止 + +10 通知。
     if (isCheatClose()) {
       const cheater = cheaterDisplayName();
-      const meCheater = Boolean(state.banned[normalizeName(identity?.luoguName ?? "")]);
+      const meCheater = isMeCheater();
       const meParticipant = Boolean(state.players[identity?.id ?? ""]) && isTeam(state.players[identity?.id ?? ""]?.team);
       if (meCheater) void showCheatPopup("cheater", cheater, roomId);
       else if (meParticipant) void showCheatPopup("participant", cheater, roomId);
@@ -1235,10 +1300,16 @@ const pushToastsForEvent = (event: DuelEvent, previousPhase: DuelState["phase"],
   // 收到 system 作弊 close 事件时，无论之前 phase 如何，都补发对应角色弹窗（showCheatPopup 自带去重）。
   if (event.type === "room.closed" && isCheatClose() && state.closed?.at === event.issuedAt && previousPhase === "finished") {
     const cheater = cheaterDisplayName();
-    const meCheater = Boolean(state.banned[normalizeName(identity?.luoguName ?? "")]);
+    const meCheater = isMeCheater();
     const meParticipant = Boolean(state.players[identity?.id ?? ""]) && isTeam(state.players[identity?.id ?? ""]?.team);
     if (meCheater) void showCheatPopup("cheater", cheater, roomId);
     else if (meParticipant) void showCheatPopup("participant", cheater, roomId);
+  }
+  // 兜底：自动封禁的“系统踢人”事件可能晚于 close 到达。若封禁的就是本人且房间已进入作弊终局，
+  // 补发作弊方弹窗（showCheatPopup 自带按角色去重），确保作弊方看到的是封禁提示而非“对方作弊补偿”。
+  if (event.type === "player.kicked" && event.system && isCheatClose() && state.phase === "finished") {
+    const targetName = normalizeName(event.targetName || state.players[event.targetId]?.luoguName || "");
+    if (targetName && isMeCheater()) void showCheatPopup("cheater", identity?.luoguName ?? event.targetName ?? "", roomId);
   }
   if (event.type === "chat.sent" && event.visibility === "team" && state.phase === "arena") {
     const chat = state.chats.find((item) => item.id === event.id);
@@ -1383,6 +1454,20 @@ const markCheatNotified = (roomId: string, role: "cheater" | "participant") => {
 
 // 比赛中的封禁者先看到红底 SweetAlert，关闭后再显示封禁遮罩（避免两个弹窗同时出现）。
 let cheatSwalOpen = false;
+
+// 本地记录的作弊者姓名：由“系统封禁（自动检测作弊）”事件同步确定，不依赖 state.banned
+// 的最终传播时机。封禁信息不能提前传播（否则会与封禁遮罩叠成两层），但判定“我是作弊方”
+// 必须使用本地的、与事件同到的信号，避免作弊方也看到“对方作弊，补偿 +10 Rating”。
+let localCheaterName: string | null = null;
+// 本地记录的作弊者姓名（来自 system 踢人事件，与事件同到），用于弹窗展示，避免 state.banned 暂未更新时显示“未知玩家”。
+let knownCheaterName: string | null = null;
+
+const isMeCheater = (): boolean => {
+  if (!identity) return false;
+  const me = normalizeName(identity.luoguName);
+  if (state.banned[me]) return true;
+  return localCheaterName !== null && normalizeName(localCheaterName) === me;
+};
 
 const showCheatPopup = async (role: "cheater" | "participant", cheaterName: string, roomId: string): Promise<void> => {
   if (isCheatNotified(roomId, role)) return;
@@ -1687,17 +1772,14 @@ const submitCreateRoom = async (event?: Event) => {
     } else {
       draft.pickerStatus = "正在读取题库";
       downloadProgress = { luogu: { percent: 0, status: "等待下载" }, codeforces: { percent: 0, status: "等待下载" }, atcoder: { percent: 0, status: "等待下载" } };
-      void Swal.fire({
-        title: "正在准备题库",
-        html: problemBankProgressHtml(),
-        allowEscapeKey: false,
-        allowOutsideClick: false,
-        showConfirmButton: false,
-        customClass: { popup: "duel-swal bank-loading-swal" }
-      });
+      void openBankLoadingModal();
       problems = await pickProblems(count, nextRoom, draft.difficultyLow, draft.difficultyHigh, draft.ratios, (platform, percent, status) => {
         downloadProgress[platform] = { percent, status };
         Swal.update({ html: problemBankProgressHtml() });
+      }, async () => {
+        const ok = await confirmLuoguDirectDownload();
+        if (ok) openBankLoadingModal();
+        return ok;
       });
     }
     problems = sortProblemsByDifficulty(problems);
@@ -1770,7 +1852,7 @@ const recoverPendingRoomSetup = async () => {
   try {
     const problems = setup.customProblems.length
       ? sortProblemsByDifficulty(setup.customProblems)
-      : sortProblemsByDifficulty(await pickProblems(setup.count, `${setup.roomId}:${crypto.randomUUID()}`, setup.difficultyLow, setup.difficultyHigh, setup.ratios, () => undefined));
+      : sortProblemsByDifficulty(await pickProblems(setup.count, `${setup.roomId}:${crypto.randomUUID()}`, setup.difficultyLow, setup.difficultyHigh, setup.ratios, () => undefined, confirmLuoguDirectDownload));
     if (!problems.length) throw new Error("重新抽题失败");
     const event: DuelEvent = {
       type: "room.configured",
@@ -1981,7 +2063,9 @@ const replaceProblem = async (targetPid: string) => {
       current,
       state.problems,
       `${roomId}:${state.lamport}:${identity.id}`,
-      state.minimumDifficulty as DifficultyLevel | undefined
+      state.minimumDifficulty as DifficultyLevel | undefined,
+      undefined,
+      confirmLuoguDirectDownload
     );
     await openVote("replace-problem", targetPid, replacement);
     setStatus(`${targetPid} → ${replacement.pid}，等待投票`);
@@ -2051,13 +2135,13 @@ const App = () => {
   // 放在渲染层而非仅 boot()，可堵住 hashchange 等绕过入口；已在 /exam 路径时不重复触发。
   if (isExamRequired() && !isExamPath()) {
     location.replace("/exam");
-    return <BootScreen leaving={false} />;
+    return null;
   }
   if (bootPhase === "loading") {
     // 按 URL 预测目标页面，渲染与之一致的骨架（含顶栏骨架），
     // 避免所有页面都显示登录卡骨架、以及个人页骨架缺顶栏导致的布局跳动。
+    // （登录卡骨架 BootScreen 已移除，避免与真实登录表单叠加冲突。）
     const target = predictedBootMode();
-    if (target === "exam") return <BootScreen leaving={false} />;
     return (
       <SkeletonShell>
         {target === "profile" ? <ProfileSkeleton />
@@ -2067,7 +2151,7 @@ const App = () => {
       </SkeletonShell>
     );
   }
-  const bootOverlay = bootScreenVisible ? <BootScreen leaving={bootScreenLeaving} /> : null;
+  const bootOverlay = null;
   if (bootPhase === "auth-error") {
     return (
       <>
@@ -2311,7 +2395,9 @@ const RoomControls = () => {
             <Handshake size={16} />
             求和
           </button>
-          <button class="danger" onClick={() => void openVote("surrender")}>
+          <button class="danger" onClick={() => void (async () => {
+            if (await confirmDanger("确认投降？", "投降需要己方全员投票通过，且会直接结束本场对决。")) void openVote("surrender");
+          })()}>
             <Flag size={16} />
             投降
           </button>
@@ -2320,7 +2406,9 @@ const RoomControls = () => {
       {canClose ? (
         <div class="close-box">
           <input value={draft.closeReason} onInput={(event) => (draft.closeReason = event.currentTarget.value)} />
-          <button class="danger" onClick={() => void closeRoom()}>
+          <button class="danger" onClick={() => void (async () => {
+            if (await confirmDanger("确认关房？", isAdmin() ? "将强制关闭该房间，对局立即结束。" : "将关闭房间，对局立即结束。")) void closeRoom();
+          })()}>
             <DoorClosed size={16} />
             {isAdmin() ? "强制关房" : "关闭房间"}
           </button>
@@ -2576,7 +2664,12 @@ const AdminPage = () => {
                 <button disabled={busy} onClick={() => void saveAdminRating(row.name)}>{busy ? <RefreshCw class="spin" size={14} /> : <Check size={14} />}保存</button>
                 <div class="admin-player-actions">
                   <button class={banned ? "ghost" : "danger"} disabled={busy || protectedAccount} onClick={() => void runAdminUserAction(row.name, banned ? "unban" : "ban")}>{banned ? <X size={14} /> : <Ban size={14} />}{banned ? "解封" : "封禁"}</button>
-                  <button class="ghost" disabled={busy || protectedAccount} onClick={() => void runAdminUserAction(row.name, muted ? "unmute" : "mute")}>{muted ? <Volume2 size={14} /> : <VolumeX size={14} />}{muted ? "解禁" : "禁言"}</button>
+                  <button class="ghost" disabled={busy || protectedAccount} onClick={() => void (async () => {
+                    const unmuting = muted;
+                    if (await confirmDanger(unmuting ? "确认解除全局禁言？" : "确认全局禁言？", unmuting ? `将解除 ${row.name} 的全局禁言。` : `将对 ${row.name} 执行全局禁言。`)) {
+                      void runAdminUserAction(row.name, unmuting ? "unmute" : "mute");
+                    }
+                  })()}>{muted ? <Volume2 size={14} /> : <VolumeX size={14} />}{muted ? "解禁" : "禁言"}</button>
                 </div>
               </article>
             );
@@ -2801,7 +2894,12 @@ const Chat = () => {
             {readOnly ? "只读" : muted ? "禁言" : "发送"}
           </button>
           {canRoomMute ? (
-            <button class={state.muted["__room__"] ? "ghost" : "danger"} onClick={(event) => { event.preventDefault(); void emitDirect({ ...baseEvent(state.muted["__room__"] ? "room.unmuted" : "room.muted") }); }}>
+            <button class={state.muted["__room__"] ? "ghost" : "danger"} onClick={(event) => { event.preventDefault(); void (async () => {
+              const unmuting = state.muted["__room__"];
+              if (await confirmDanger(unmuting ? "确认解禁？" : "确认禁言？", unmuting ? "将解除本房间全员禁言。" : "将禁言本房间全员，期间无法发言。")) {
+                void emitDirect({ ...baseEvent(unmuting ? "room.unmuted" : "room.muted") });
+              }
+            })(); }}>
               {state.muted["__room__"] ? <Volume2 size={15} /> : <VolumeX size={15} />}
               {state.muted["__room__"] ? "解禁" : "禁言"}
             </button>
@@ -3778,7 +3876,6 @@ type ExamQuestion = {
   correctIndex: number;
 };
 
-const EXAM_PASSED_KEY = "vjudge-duel.exam-passed.v3";
 const EXAM_TOTAL = 20;
 const EXAM_RULES_URL = "https://gengen.qzz.io/duel/rule";
 
@@ -3856,42 +3953,29 @@ const startExam = (wrongIds?: string[]) => {
 
 const isExamPath = (): boolean => location.pathname.replace(/\/+$/, "") === "/exam";
 
-// 考试通过状态：服务端（worker）为权威来源，按规范化洛谷用户名持久化，跨设备一致。
-// 本地 localStorage 仅作为离线/灰度期的降级缓存。examPassedServer 为 null 表示尚未与服务端同步。
+// 考试通过状态：服务端（worker）为唯一权威来源，按规范化洛谷用户名持久化，跨设备一致。
+// 已废除本地 localStorage 缓存：不再用本地记录兜底，避免服务端记录与本地不一致导致的门禁/重复考试问题。
+// examPassedServer：本会话从服务端校验的结果（null = 尚未/未能确认）。
+// examPassedThisSession：标记“本标签页内刚刚通过考试”，用于避免服务端瞬时校验失败（网络抖动、写库延迟）
+//   时把刚通过的用户弹回 /exam 形成死循环——只要本会话内通过过，就不再重复弹。
 let examPassedServer: boolean | null = null;
+let examPassedThisSession = false;
 
-const isExamPassedLocal = (): boolean => {
-  try { return localStorage.getItem(EXAM_PASSED_KEY) === "1"; } catch { return false; }
-};
+const isExamPassed = (): boolean => examPassedServer === true || examPassedThisSession;
 
-const isExamPassed = (): boolean => examPassedServer ?? isExamPassedLocal();
+// 仅在“服务端明确返回未通过”时才要求考试；未知（null，多为网络抖动）不弹回，避免死循环。
+const isExamRequired = (): boolean => examPassedServer === false;
 
-const isExamRequired = (): boolean => !isExamPassed();
-
-// 与服务端同步考试通过状态。已通过则写入本地缓存；本地已通过但服务端未记录（灰度前老用户）
-// 则回写服务端，避免更换设备后重复考试。网络异常时维持本地判断，不阻断使用。
+// 与服务端同步考试通过状态。服务端为唯一权威来源，不再读写本地缓存。
 const syncExamStatus = async (): Promise<void> => {
   if (!identity?.luoguName) return;
   try {
     const passed = await fetchExamStatus(identity.luoguName);
-    const localPassed = isExamPassedLocal();
-    if (passed) {
-      examPassedServer = true;
-      try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
-    } else {
-      examPassedServer = false;
-      if (localPassed) {
-        try {
-          await passExamServer(identity.luoguName);
-          examPassedServer = true;
-        } catch {
-          // 服务端回写失败则维持本地通过状态，避免重复考试。
-          examPassedServer = true;
-        }
-      }
-    }
+    // 本会话内已通过则不被服务端瞬时结果翻回，避免写库延迟/网络抖动导致的死循环。
+    if (!passed && examPassedThisSession) return;
+    examPassedServer = passed;
   } catch {
-    // 网络异常：保留本地判断，不改变 examPassedServer。
+    // 网络异常：维持当前 examPassedServer（null 表示尚未同步，门禁会要求先考试）。
   }
   notify();
 };
@@ -3933,9 +4017,18 @@ const handleExamSubmit = async () => {
   }
 
   if (wrong === 0) {
-    try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
+    // 必须等服务端真正记录通过后再跳转：若写库失败仍强行跳到 /，门禁重新校验会得到 false，
+    // 又弹回 /exam，形成 / 与 /exam 的死循环。失败则留在当前页提示重试。
+    try {
+      await passExamServer(identity.luoguName);
+    } catch (error) {
+      examSubmitted = false;
+      setStatus(error instanceof Error ? error.message : "考试通过记录失败，请重试", "error");
+      notify();
+      return;
+    }
     examPassedServer = true;
-    try { await passExamServer(identity.luoguName); } catch { /* ignore：服务端失败不影响本地通过 */ }
+    examPassedThisSession = true;
     await Swal.fire({
       title: "考试通过",
       html: "<p>恭喜你通过了 VJudge Duel 规则考试，现在可以正常使用了。</p>",
@@ -3968,7 +4061,7 @@ const adminSkipExam = async () => {
   try {
     await passExamServer(identity.luoguName);
     examPassedServer = true;
-    try { localStorage.setItem(EXAM_PASSED_KEY, "1"); } catch { /* ignore */ }
+    examPassedThisSession = true;
     location.href = "/";
   } catch (error) {
     setStatus(error instanceof Error ? error.message : "跳过考试失败", "error");
@@ -4430,13 +4523,11 @@ const achievementsFor = (name: string, row: RatingRow) => {
   const rank = rows.findIndex((item) => normalizeName(item.name) === normalizeName(name)) + 1;
   const roomsForPlayer = playerRooms(name);
   const firstDone = row.games > 0;
-  const fastWin = roomsForPlayer.some((room) => room.startedAt && room.endedAt && room.endedAt - room.startedAt <= 180000);
   const championDone = usersLoaded && row.games > 0 && rank === 1;
   return [
     { Icon: Star, title: "一等星", text: "进入排行榜前 20。", progress: rank > 0 && rank <= 20 ? 100 : 0 },
     { Icon: Swords, title: "决斗家", text: "获得 10 场胜利。", progress: Math.min(100, row.wins * 10) },
     { Icon: Sprout, title: "初出茅庐", text: "完成第一场决斗。", progress: firstDone ? 100 : 0 },
-    { Icon: Zap, title: "闪电战", text: "在 3 分钟内结束一场对局。", progress: fastWin ? 100 : 0 },
     { Icon: Trophy, title: "冠军", text: "登上排行榜第一名。", progress: championDone ? 100 : 0 },
     { Icon: Medal, title: "常胜", text: "胜率达到 70%，且至少完成 5 场。", progress: row.games >= 5 ? Math.min(100, Math.round((row.wins / row.games / 0.7) * 100)) : Math.min(80, row.games * 16) }
   ];

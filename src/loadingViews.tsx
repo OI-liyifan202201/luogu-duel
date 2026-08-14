@@ -38,15 +38,6 @@ export const AdminPlayersSkeleton = () => <div class="admin-players-skeleton" ar
 
 export const AdminRoomsSkeleton = () => <div class="admin-rooms-skeleton" aria-hidden="true">{Array.from({ length: 4 }, (_, index) => <div class="admin-room skeleton-item" key={index}><code /><span><b /><em /></span><button /></div>)}</div>;
 
-export const BootScreen = ({ leaving }: { leaving: boolean }) => (
-  <main class={`boot-screen${leaving ? " leaving" : ""}`} aria-label="正在载入">
-    <section class="auth-card boot-auth-skeleton" aria-hidden="true">
-      <div class="auth-intro"><i /><small /><strong /><span /></div>
-      <div class="paste-login"><strong /><div class="boot-auth-tabs"><i /><i /></div><span /><div class="boot-auth-lines"><i /><i /></div><footer><i /><b /></footer></div>
-    </section>
-  </main>
-);
-
 // 个人主页加载骨架：与真实个人主页布局一致，避免看起来像登陆页骨架
 export const ProfileSkeleton = () => (
   <main class="profile-page">

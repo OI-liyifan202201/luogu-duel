@@ -83,12 +83,13 @@ export const pickProblems = async (
   low: DifficultyLevel,
   high: DifficultyLevel,
   ratios: PlatformRatios,
-  progress: Progress
+  progress: Progress,
+  luoguDirectConfirm?: () => Promise<boolean>
 ): Promise<Problem[]> => {
   const requested = normalizedRatios(ratios);
   if (!platforms.some((platform) => requested[platform] > 0)) throw new Error("请至少启用一个 OJ");
 
-  const banks = await Promise.all(platforms.map((platform) => loadBank(platform, progress)));
+  const banks = await Promise.all(platforms.map((platform) => loadBank(platform, progress, luoguDirectConfirm)));
   const quotas = distribute(count, requested);
   const minimum = Math.min(low, high) as DifficultyLevel;
   const maximum = Math.max(low, high) as DifficultyLevel;
@@ -117,10 +118,11 @@ export const pickReplacementProblem = async (
   usedProblems: Problem[],
   seed: string,
   minimumDifficulty?: DifficultyLevel,
-  progress: Progress = () => undefined
+  progress: Progress = () => undefined,
+  luoguDirectConfirm?: () => Promise<boolean>
 ): Promise<Problem> => {
   const platform = current.platform ?? "luogu";
-  const bank = await loadBank(platform, progress);
+  const bank = await loadBank(platform, progress, luoguDirectConfirm);
   const source = typeof current.difficulty === "number"
     ? current
     : bank.find((item) => item.pid.toLowerCase() === current.pid.toLowerCase());
@@ -142,7 +144,14 @@ const minimumProblemDifficulty = (problems: Problem[]): DifficultyLevel => {
 export const cachedProblemCount = (): number =>
   platforms.reduce((sum, platform) => sum + (memoryBanks.get(platform)?.length ?? readCache(platform)?.items.length ?? 0), 0);
 
-const loadBank = async (platform: ProblemPlatform, progress: Progress): Promise<BankItem[]> => {
+// 洛谷开放平台题库直链（绕过 Cloudflare 代理）：Cloudflare 下载失败或超时时的备选来源。
+const LUOGU_DIRECT_URL = "https://cdn.luogu.com.cn/problemset-open/latest.ndjson.gz";
+
+const loadBank = async (
+  platform: ProblemPlatform,
+  progress: Progress,
+  luoguDirectConfirm?: () => Promise<boolean>
+): Promise<BankItem[]> => {
   const memory = memoryBanks.get(platform);
   if (memory) {
     progress(platform, 100, `${memory.length.toLocaleString()} 题 · 内存缓存`);
@@ -155,10 +164,37 @@ const loadBank = async (platform: ProblemPlatform, progress: Progress): Promise<
     return cached.items;
   }
 
-  progress(platform, 3, "正在连接");
-  const response = await fetch(sources[platform], { cache: "default", signal: AbortSignal.timeout(300_000) });
-  if (!response.ok) throw new Error(`${labels[platform]} 题库下载失败 (${response.status})`);
-  const raw = await readWithProgress(response, (percent) => progress(platform, percent, `正在下载 ${percent}%`));
+  // 洛谷题库较大：默认走 Cloudflare 代理；若下载失败或超过 60s，询问用户是否直接从
+  // 洛谷开放平台下载（绕过 Cloudflare）。其余平台仍用 5 分钟兜底超时。
+  const timeoutMs = platform === "luogu" ? 60_000 : 300_000;
+  const fetchRaw = async (url: string, label: string): Promise<Uint8Array | null> => {
+    try {
+      progress(platform, 3, `正在连接 ${label}`);
+      const response = await fetch(url, { cache: "default", signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) {
+        progress(platform, 0, `${label} 下载失败 (${response.status})`);
+        return null;
+      }
+      return await readWithProgress(response, (percent) => progress(platform, percent, `${label} 下载 ${percent}%`));
+    } catch {
+      progress(platform, 0, `${label} 下载失败或超时`);
+      return null;
+    }
+  };
+
+  let raw = await fetchRaw(sources[platform], `${labels[platform]}（Cloudflare）`);
+  if (!raw && platform === "luogu" && luoguDirectConfirm) {
+    const useDirect = await luoguDirectConfirm();
+    if (useDirect) raw = await fetchRaw(LUOGU_DIRECT_URL, "洛谷开放平台");
+  }
+  if (!raw) {
+    throw new Error(
+      platform === "luogu"
+        ? "洛谷题库下载失败，可检查网络后重试，或在弹窗中选择从洛谷开放平台直接下载"
+        : `${labels[platform]} 题库下载失败`
+    );
+  }
+
   progress(platform, 86, "正在解压与解析");
   const text = raw[0] === 0x1f && raw[1] === 0x8b ? inflate(raw, { toText: true }) : new TextDecoder().decode(raw);
   const items = parseBank(platform, text);

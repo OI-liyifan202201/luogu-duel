@@ -317,8 +317,8 @@ code {
 .brand img {
   width: auto;
   height: auto;
-  max-width: 25px;
-  max-height: 25px;
+  max-width: 40px;
+  max-height: 40px;
   flex: 0 1 auto;
   object-fit: contain;
 }
@@ -443,6 +443,12 @@ code {
 .theme-editor-swal {
   width: min(480px, calc(100vw - 24px)) !important;
 }
+
+/* 主题编辑器按钮：hover 判断放在稳定的父级包裹框上，避免按钮上浮时指针脱离导致的抽搐。
+   .swal-btn-wrap 不随按钮 transform 移动，所以指针停在包裹框内时 hover 不会反复触发。 */
+.theme-editor-swal button:hover:not(:disabled) { transform: none; }
+.theme-editor-swal .swal-btn-wrap { display: inline-block; }
+.theme-editor-swal .swal-btn-wrap:hover > button { transform: translateY(-1px); }
 
 .te-color-row {
   display: flex;
@@ -2174,12 +2180,12 @@ img.chat-avatar {
   gap: 5px;
   margin-bottom: 8px;
   padding: 8px;
+  height: 116px;
+  overflow: hidden;
 }
 
 .problem-card,
 .team-card,
-.duel-row,
-.ranking-row,
 .achievement,
 .profile-section,
 .admin-player,

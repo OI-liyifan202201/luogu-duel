@@ -355,6 +355,15 @@ const leavePlayer = (state: DuelState, actorId: string, at: number) => {
   delete state.kicked[actorId];
   if (state.hostId === actorId) state.hostId = Object.keys(state.players)[0];
   if (state.roomId !== "global" && leavingTeam !== "spectator") pushSystem(state, `${player.luoguName} 退出房间`, at);
+  // 成员退出会改变法定人数：重新结算所有进行中的投票。
+  // 例如 4/5 通过时若 2 人退出，剩余 3 人若已全部同意，应当立刻换题/平局/投降，
+  // 而不能因为“离开”动作本身没有触发 settleVote 而让投票卡在“已通过但未生效”。
+  for (const vote of Object.values(state.votes)) {
+    if (vote.status !== "open") continue;
+    delete vote.approvals[actorId];
+    delete vote.rejections[actorId];
+    settleVote(state, vote, at);
+  }
   // 对方整队无人 -> 我方直接胜利
   if (state.phase === "arena") {
     const reds = Object.values(state.players).filter((entry) => entry.team === "red").length;

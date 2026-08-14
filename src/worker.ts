@@ -697,7 +697,9 @@ export class DuelRoom extends DurableObject<Env> {
   private async handleDirectory(request: Request): Promise<Response> {
     if (request.method === "GET") {
       await this.ctx.storage.setAlarm(Date.now() + DIRECTORY_PRUNE_INTERVAL_MS);
-      return Response.json({ rooms: this.listRooms() }, { headers: cacheHeaders(60, 24 * 60 * 60) });
+      // 边缘缓存 300s 即可：房间目录靠 WebSocket 实时推送，HTTP 仅作兜底/手动刷新，
+      // 过长缓存（24h）会让“已结束/平局”的房间在列表里长时间停留在“进行中”。
+      return Response.json({ rooms: this.listRooms() }, { headers: cacheHeaders(60, 300) });
     }
     if (request.method === "POST") {
       this.directoryObject = true;
@@ -1457,10 +1459,13 @@ export default {
     if (request.method !== "GET" || !assetResponse.ok) return assetResponse;
     const pathname = new URL(request.url).pathname;
     const headers = new Headers(assetResponse.headers);
-    if (pathname === "/" || pathname.endsWith(".html")) {
-      headers.set("cache-control", "no-store");
-    } else {
+    // 仅对真实静态资源（带扩展名且非 .html）做长边缘缓存；SPA 路由（/、/exam、/user/...）
+    // 的 HTML 一律 no-store，否则边缘会缓存住旧版页面、掩盖门禁/重定向修复。
+    const isStaticAsset = /\.[a-z0-9]+$/i.test(pathname) && !pathname.endsWith(".html");
+    if (isStaticAsset) {
       headers.set("cache-control", "public, max-age=0, must-revalidate, s-maxage=86400, stale-while-revalidate=604800");
+    } else {
+      headers.set("cache-control", "no-store");
     }
     return new Response(assetResponse.body, { status: assetResponse.status, statusText: assetResponse.statusText, headers });
   }

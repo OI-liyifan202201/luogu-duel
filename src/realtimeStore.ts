@@ -1,5 +1,4 @@
 import type { SignedEnvelope } from "./types";
-import { normalizeName } from "./domain";
 
 export type RoomListing = {
   roomId: string;
@@ -91,36 +90,10 @@ export const fetchUsers = async (): Promise<UserRecord[]> => {
   return Array.isArray(data.users) ? data.users : [];
 };
 
-// 考试通过状态在本地权威缓存 30 天：服务端为唯一权威来源，但拿到结果后写入本地，
-// 30 天内直接信任本地缓存、不再访问 /api/exam/status，显著减少对服务端的请求。
-const EXAM_STATUS_TTL = 30 * 24 * 60 * 60 * 1000;
-const examStatusCacheKey = (name: string): string => `vjudge-duel.exam-status.${normalizeName(name)}`;
-
-const readExamStatusCache = (name: string): boolean | null => {
-  try {
-    const raw = localStorage.getItem(examStatusCacheKey(name));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { passed?: boolean; at?: number };
-    if (typeof parsed.passed !== "boolean" || typeof parsed.at !== "number") return null;
-    if (Date.now() - parsed.at >= EXAM_STATUS_TTL) return null;
-    return parsed.passed;
-  } catch {
-    return null;
-  }
-};
-
-const writeExamStatusCache = (name: string, passed: boolean): void => {
-  try {
-    localStorage.setItem(examStatusCacheKey(name), JSON.stringify({ passed, at: Date.now() }));
-  } catch {
-    // 本地缓存不可用时回退为每次访问服务端。
-  }
-};
-
+// 考试通过状态：服务端（worker）为唯一权威来源，每次都直连 /api/exam/status 校验，
+// 不再做任何本地缓存。旧的 localStorage 缓存（30 天 TTL）会让“已通过”的用户被旧缓存里的
+// false 弹回 /exam，与服务端记录来回横跳形成 / 与 /exam 的死循环。
 export const fetchExamStatus = async (name: string): Promise<boolean> => {
-  // 命中本地权威缓存（30 天内）则直接返回，避免无谓的服务端请求。
-  const cached = readExamStatusCache(name);
-  if (cached !== null) return cached;
   requireServerRequest();
   const response = await fetch(`/api/exam/status?user=${encodeURIComponent(name)}`, {
     cache: "no-store",
@@ -128,9 +101,7 @@ export const fetchExamStatus = async (name: string): Promise<boolean> => {
   });
   if (!response.ok) throw new Error(`exam status failed: ${response.status}`);
   const data = (await response.json()) as { passed?: boolean };
-  const passed = data.passed === true;
-  writeExamStatusCache(name, passed);
-  return passed;
+  return data.passed === true;
 };
 
 export const passExamServer = async (name: string): Promise<void> => {
@@ -142,8 +113,6 @@ export const passExamServer = async (name: string): Promise<void> => {
     signal: AbortSignal.timeout(requestTimeoutMs)
   });
   if (!response.ok) throw new Error(`exam pass failed: ${response.status}`);
-  // 通过后立即写入本地权威缓存，后续 30 天内不再访问服务端。
-  writeExamStatusCache(name, true);
 };
 
 export const fetchLowRoomAvailability = async (name: string): Promise<boolean> => {
