@@ -457,7 +457,8 @@ const closeRoom = (state: DuelState, event: Extract<DuelEvent, { type: "room.clo
   state.closed = { reason: event.reason.trim() || "房间已关闭", by: event.actorName, at: event.issuedAt };
   // system 作弊封禁覆盖已结束比赛：清除作弊 AC 产生的胜利，使该房间按"作弊取消"处理。
   if (event.system) state.winner = undefined;
-  pushSystem(state, `房间已关闭：${state.closed.reason}`, event.issuedAt);
+  // 系统消息中隐藏 close reason 里"｜姓名"分隔符后的作弊者姓名（仅用于程序解析，不面向用户展示）。
+  pushSystem(state, `房间已关闭：${state.closed.reason.split("｜")[0].trim() || "房间已关闭"}`, event.issuedAt);
 };
 
 const kickPlayer = (state: DuelState, event: Extract<DuelEvent, { type: "player.kicked" }>): void => {

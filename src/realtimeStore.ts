@@ -82,7 +82,7 @@ export const fetchRooms = async (): Promise<RoomListing[]> => {
 export const fetchUsers = async (): Promise<UserRecord[]> => {
   requireServerRequest();
   const response = await fetch("/api/users", {
-    cache: "default",
+    cache: "no-store",
     signal: AbortSignal.timeout(requestTimeoutMs)
   });
   if (!response.ok) throw new Error(`users request failed: ${response.status}`);
@@ -136,7 +136,7 @@ export const clearRoomDraft = async (roomId: string, secret: string): Promise<vo
 export const fetchUserRecord = async (name: string): Promise<UserRecord | null> => {
   requireServerRequest();
   const response = await fetch(`/api/users/${encodeURIComponent(name)}`, {
-    cache: "default",
+    cache: "no-store",
     signal: AbortSignal.timeout(requestTimeoutMs)
   });
   if (response.status === 404) return null;

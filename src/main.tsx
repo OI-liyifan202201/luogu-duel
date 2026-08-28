@@ -8,8 +8,12 @@ import type { ComponentChildren, JSX } from "preact";
 import { render } from "preact";
 import { useEffect, useRef } from "preact/hooks";
 import {
+  AlertTriangle,
+  ArrowLeft,
   Ban,
+  Bell,
   Building2,
+  Inbox,
   Check,
   ChevronDown,
   ChevronRight,
@@ -29,20 +33,25 @@ import {
   Monitor,
   Moon,
   Palette,
+  Pencil,
   Pin,
   Play,
   Radio,
   RefreshCw,
+  Search,
   Send,
   Shield,
   Sprout,
   Star,
   Sun,
   Swords,
+  Tag,
   Terminal,
+  Ticket,
   Trash2,
   Trophy,
   UserMinus,
+  UserPlus,
   Users,
   Volume2,
   VolumeX,
@@ -70,14 +79,14 @@ import { cachedProblemCount, defaultRatios, difficultyMeta, parseCustomProblems,
 import { loadVJudgeSession, logoutVJudgeSession, verifyVJudgeLogin, type VJudgeLoginMethod, type VJudgeSession } from "./oauth";
 import { allowServerRequest, clearRoomDraft, directoryWebSocketUrl, fetchExamStatus, fetchLowRoomAvailability, fetchRooms, fetchSnapshot, fetchUserRecord, fetchUsers, passExamServer, publishEnvelope, roomWebSocketUrl, saveUserRecord, setServerRequestWarningHandler, updateUserRating, type RoomListing, type ServerMessage, type UserRecord } from "./realtimeStore";
 import { fetchVJudgeRecords } from "./vjudge";
-import { AdminPlayersSkeleton, AdminRoomsSkeleton, AdminSkeleton, ChatSkeleton, HomeSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, RoomSkeleton, SkeletonShell } from "./loadingViews";
+import { AdminPlayersSkeleton, AdminRoomsSkeleton, AdminSkeleton, ChatSkeleton, HomeSkeleton, ProfileSkeleton, RankingSkeleton, RoomListSkeleton, RoomSkeleton, SkeletonShell, TicketsSkeleton } from "./loadingViews";
 import type { ChatMessage, DuelEvent, DuelState, Player, Problem, Seat, SignedEnvelope, VoteKind } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing #app");
 
 type BootPhase = "loading" | "auth-error" | "ready";
-type ViewMode = "home" | "room" | "profile" | "admin" | "exam";
+type ViewMode = "home" | "room" | "profile" | "admin" | "exam" | "tickets";
 
 function profileNameFromPath(): string {
   const match = decodeURIComponent(location.pathname).match(/^\/user\/([^/]+)\/?$/);
@@ -170,7 +179,7 @@ const lightBrandLogoUrl = "https://cdn.luogu.com.cn/upload/image_hosting/tq5l486
 const avatarCacheKey = "luogu-duel.avatar-cache";
 const userCacheKey = "luogu-duel.user-cache";
 const registrationCacheKey = "luogu-duel.registration-cache";
-const userCacheTtl = 24 * 60 * 60 * 1000;
+const userCacheTtl = 30 * 60 * 1000;
 const themeModeKey = "luogu-duel.theme-mode";
 const bgImageKey = "luogu-duel.bg-image";
 const frostedKey = "luogu-duel.frosted";
@@ -435,7 +444,11 @@ const boot = async () => {
       else globalSocket.send("ping");
     }
   }, 45_000);
-  window.addEventListener("hashchange", () => void enterFromHash());
+  window.addEventListener("hashchange", () => {
+    // 首次真实内容已渲染完成，此后页面切换恢复正常入场动画（card-in）。
+    document.documentElement.classList.remove("boot-instant");
+    void enterFromHash();
+  });
   window.addEventListener("online", () => {
     connectRoom();
     connectDirectory();
@@ -469,18 +482,29 @@ const boot = async () => {
   }
 
   identity = await renameIdentity(identity, vjudgeSession.username);
-  bootPhase = "ready";
   await registerCurrentUser();
   // 考试门禁在服务端记录中按规范化洛谷用户名持久化，因此需要先登录拿到用户名再查询。
   await syncExamStatus();
-  await refreshGlobalModeration();
+  // 未通过考试立即跳 /exam：必须先于任何网络请求（通知/管理员名单/大厅快照）完成判定，
+  // 否则整页跳转（location.replace）会中止飞行中的 fetch，控制台出现红色 0 B 失败记录
+  // （如 snapshot?secret=public-lobby / api/notifications / api/admin-names）。
   if (isExamRequired() && !isExamPath()) {
     location.replace("/exam");
     finishBootScreen();
     return;
   }
-
+  // 通知中心是全局的：登录后立即拉取一次通知与管理员名单。
+  void loadTicketNotifications();
+  void loadAdminNames();
+  // 先 settle 目标页面（enterFromHash），让 bootPhase 翻为 ready 时的首次内容渲染就处于最终 mode，
+  // 避免"骨架→profile→home/room"多次挂载导致入场动画（card-in）在访问站点时重复播放 2~3 次。
   await enterFromHash();
+  // 考试页不拉大厅快照（用不上，纯浪费一次请求）。
+  if (mode !== "exam") await refreshGlobalModeration();
+  // 骨架图已播放过入场动画，首次真实内容渲染禁用 card-in/pop-in，避免二次淡入。
+  // hashchange 监听器会在首次用户导航时移除该 class。
+  document.documentElement.classList.add("boot-instant");
+  bootPhase = "ready";
   finishBootScreen();
 };
 
@@ -502,6 +526,27 @@ const enterFromHash = async () => {
     return;
   }
   const params = new URLSearchParams(location.hash.slice(1));
+  const ticketId = (params.get("ticket") || "").trim();
+  if (params.get("tickets") === "1" || ticketId) {
+    mode = "tickets";
+    roomId = "global";
+    roomSecret = "public-lobby";
+    closeSocket();
+    closeGlobalModeration();
+    ticketView = ticketId ? "detail" : "list";
+    ticketDetailId = ticketId || "";
+    ticketDetail = null;
+    ticketComments = [];
+    ticketCommentDraft = "";
+    ticketAssigneeDraft = "";
+    ticketClosedReasonDraft = "";
+    if (ticketId) void loadTicket(ticketId);
+    else void loadTickets();
+    void loadTicketNotifications();
+    setStatus(ticketId ? "工单详情" : "工单中心");
+    notify();
+    return;
+  }
   const profileName = profileNameFromPath();
   const adminRequested = params.get("admin") === "1";
   if (profileName && !(adminRequested && isAdmin())) {
@@ -1095,7 +1140,6 @@ const handleDirectoryMessage = async (raw: string) => {
     lastDirectoryLiveAt = Date.now();
     statusTone = "info";
     statusText = "大厅在线";
-    drainHomeCheatNotices();
   }
   if (message.type === "users") {
     users = dedupeUserRecords(message.users);
@@ -1213,7 +1257,11 @@ const receiveEnvelope = async (envelope: SignedEnvelope, renderNow = true) => {
   const previousSystemCount = state.system.length;
   envelopes.push(envelope);
   envelopes.sort(compareEnvelopes);
-  state = applyEvents(roomId, envelopes.map((item) => item.event));
+  // 增量更新：若新信封是当前最新事件（按 lamport/issuedAt 追加在末尾），直接在上一份状态上 applyEvent，
+  // 避免每次收消息都把整个事件日志从头 replay 一遍（繁忙房间里这是发消息越来越卡的根因，O(n)→O(1)）。
+  // 乱序到达时退回全量 replay 以保证正确性。
+  const appendedLast = envelopes.length > 0 && envelopes[envelopes.length - 1].event.id === envelope.event.id;
+  state = appendedLast ? applyEvent(state, envelope.event) : applyEvents(roomId, envelopes.map((item) => item.event));
   writeEventCache(roomId, envelopes);
   if (roomId === "global") globalModeration = state;
   saveHistory();
@@ -1283,8 +1331,13 @@ const pushToastsForEvent = (event: DuelEvent, previousPhase: DuelState["phase"],
     }
   }
   if (previousPhase !== "finished" && state.phase === "finished") {
-    // 作弊导致的比赛终止：作弊者看到封禁弹窗，其余参赛者看到终止 + +10 通知。
+    // 作弊导致的比赛终止：作弊者看到“等待审查”弹窗，其余参赛者看到终止通知。
     if (isCheatClose()) {
+      const parsed = cheaterFromCloseReason();
+      if (parsed) {
+        knownCheaterName = parsed;
+        if (identity && normalizeName(parsed) === normalizeName(identity.luoguName)) localCheaterName = identity.luoguName;
+      }
       const cheater = cheaterDisplayName();
       const meCheater = isMeCheater();
       const meParticipant = Boolean(state.players[identity?.id ?? ""]) && isTeam(state.players[identity?.id ?? ""]?.team);
@@ -1299,6 +1352,11 @@ const pushToastsForEvent = (event: DuelEvent, previousPhase: DuelState["phase"],
   // 作弊封禁覆盖：作弊 AC 同时是制胜 AC 时，"胜利"先于封禁到达，上面的 finish 分支不会触发。
   // 收到 system 作弊 close 事件时，无论之前 phase 如何，都补发对应角色弹窗（showCheatPopup 自带去重）。
   if (event.type === "room.closed" && isCheatClose() && state.closed?.at === event.issuedAt && previousPhase === "finished") {
+    const parsed = cheaterFromCloseReason();
+    if (parsed) {
+      knownCheaterName = parsed;
+      if (identity && normalizeName(parsed) === normalizeName(identity.luoguName)) localCheaterName = identity.luoguName;
+    }
     const cheater = cheaterDisplayName();
     const meCheater = isMeCheater();
     const meParticipant = Boolean(state.players[identity?.id ?? ""]) && isTeam(state.players[identity?.id ?? ""]?.team);
@@ -1475,22 +1533,23 @@ const showCheatPopup = async (role: "cheater" | "participant", cheaterName: stri
   if (role === "cheater") {
     cheatSwalOpen = true;
     notify();
-    await Swal.fire({
-      title: "因作弊被封禁",
-      html: "检测到作弊，你的 Rating 已清零，且已被全局封禁。",
+    const result = await Swal.fire({
+      title: "疑似作弊，等待审查",
+      html: "您可能被判定为作弊，请等待管理员审查，审查进度可在工单查看。",
       imageUrl: "/match-ban.png",
       imageWidth: 160,
       imageHeight: 160,
-      confirmButtonText: "我知道了",
+      confirmButtonText: "前往工单中心",
       customClass: { popup: "duel-swal cheat-swal", confirmButton: "duel-swal-confirm cheat-swal-confirm" }
     });
     cheatSwalOpen = false;
     notify();
+    if (result.isConfirmed) location.hash = "tickets=1";
     return;
   }
   await Swal.fire({
-    title: "检测到作弊者",
-    html: `作弊者 <b>${cheaterName || "未知玩家"}</b> 已受到惩罚，本场对决终止。<br/>作为补偿，你获得 <b>+10 Rating</b>。`,
+    title: "对决已终止",
+    html: `本场对决因 <b>${cheaterName || "未知玩家"}</b> 疑似作弊已终止，相关举报已提交至工单中心，等待管理员审查。`,
     imageUrl: "/match-ban.png",
     imageWidth: 160,
     imageHeight: 160,
@@ -1499,19 +1558,12 @@ const showCheatPopup = async (role: "cheater" | "participant", cheaterName: stri
   });
 };
 
-const drainHomeCheatNotices = () => {
-  if (!identity) return;
-  const me = normalizeName(identity.luoguName);
-  for (const room of rooms) {
-    if (!room.cheatBanned || room.status !== "finished") continue;
-    const cheaterIsMe = Boolean(room.cheaterName) && normalizeName(room.cheaterName!) === me;
-    const participantIsMe = [...(room.redPlayers ?? []), ...(room.bluePlayers ?? [])].some((name) => normalizeName(name) === me);
-    if (cheaterIsMe) {
-      markCheatNotified(room.roomId, "cheater");
-    } else if (participantIsMe && !isCheatNotified(room.roomId, "participant")) {
-      void showCheatPopup("participant", room.cheaterName ?? "", room.roomId);
-    }
-  }
+// 从作弊终止的 close reason 解析作弊者姓名（自动检测路径把姓名写在分隔符之后）。
+const cheaterFromCloseReason = (): string => {
+  const reason = state.closed?.reason ?? "";
+  const idx = reason.indexOf("｜");
+  if (idx >= 0) return reason.slice(idx + 1).trim();
+  return "";
 };
 
 const refreshGlobalModeration = async () => {
@@ -2126,6 +2178,7 @@ const predictedBootMode = (): ViewMode => {
   if (profileNameFromPath()) return "profile";
   const params = new URLSearchParams(location.hash.slice(1));
   if (params.get("admin") === "1") return "admin";
+  if (params.get("tickets") === "1" || params.get("ticket")) return "tickets";
   return params.get("room") ? "room" : "home";
 };
 
@@ -2147,7 +2200,8 @@ const App = () => {
         {target === "profile" ? <ProfileSkeleton />
           : target === "admin" ? <AdminSkeleton />
             : target === "room" ? <RoomSkeleton />
-              : <HomeSkeleton />}
+              : target === "tickets" ? <TicketsSkeleton />
+                : <HomeSkeleton />}
       </SkeletonShell>
     );
   }
@@ -2162,9 +2216,10 @@ const App = () => {
   }
   return (
     <>
-      <Shell title="VJudge Duel" subtitle={mode === "exam" ? "rule exam" : mode === "profile" ? "user" : mode === "admin" ? "admin" : mode === "home" ? "control room" : `${roomId} / ${state.phase}`}>
-        {mode === "exam" ? <ExamPage /> : mode === "profile" ? <ProfilePage /> : mode === "admin" ? <AdminPage /> : mode === "home" ? <Home /> : <Room />}
+      <Shell title="VJudge Duel" subtitle={mode === "exam" ? "rule exam" : mode === "profile" ? "user" : mode === "admin" ? "admin" : mode === "tickets" ? "tickets" : mode === "home" ? "control room" : `${roomId} / ${state.phase}`}>
+        {mode === "exam" ? <ExamPage /> : mode === "profile" ? <ProfilePage /> : mode === "admin" ? <AdminPage /> : mode === "tickets" ? <TicketsPage /> : mode === "home" ? <Home /> : <Room />}
       </Shell>
+      <NotificationDrawer />
       <ToastStack />
       <BanOverlay />
       {bootOverlay}
@@ -2207,6 +2262,8 @@ const Shell = ({ title, subtitle, children }: { title: string; subtitle: string;
               if (mode === "exam") location.href = "/#admin=1";
               else location.hash = mode === "admin" ? "" : "admin=1";
             }}><Shield size={15} />{mode === "admin" ? "主页" : "管理"}</button> : null}
+            <button class="ghost" onClick={() => { location.hash = "tickets=1"; }}><Ticket size={15} />工单</button>
+            <NotificationBell />
             <button class="session-user" onClick={() => {
               if (draft.userMenuClosing) { draft.userMenuClosing = false; draft.userMenuOpen = true; notify(); return; }
               if (draft.userMenuOpen) closeUserMenu();
@@ -2714,6 +2771,41 @@ const runAdminUserAction = async (name: string, action: "ban" | "unban" | "mute"
   }
 };
 
+// 从“举报用户xxx比赛疑似作弊”标题中解析被举报用户名。
+const parseReportedUser = (title: string): string | null => {
+  const m = /^举报用户(.+?)比赛疑似作弊$/.exec(title.trim());
+  return m ? m[1] : null;
+};
+
+// 工单内的快捷封禁：全局封禁被举报用户。
+const banUserFromTicket = async (name: string) => {
+  if (!isAdmin() || !name) return;
+  if (isAdminName(name)) {
+    setStatus("不能操作管理员账号", "error");
+    return;
+  }
+  try {
+    draft.adminTarget = name;
+    await ensureGlobalAdminJoined();
+    await moderateGlobal("ban");
+    setStatus(`已封禁 ${name}`);
+  } catch (error) {
+    setStatus(friendlyError(error, "封禁失败"), "error");
+  }
+};
+
+// 工单内的快捷清零 Rating：将被举报用户的 Rating 重置为 0。
+const resetRatingFromTicket = async (name: string) => {
+  if (!isAdmin() || !name) return;
+  try {
+    const user = await updateUserRating(name, 0, identity.luoguName);
+    updateLocalUser(user.name, user, false);
+    setStatus(`已将 ${user.name} 的 Rating 清零`);
+  } catch (error) {
+    setStatus(friendlyError(error, "清零失败"), "error");
+  }
+};
+
 const saveAdminRating = async (name: string) => {
   const nameKey = normalizeName(name);
   const key = `user:${nameKey}`;
@@ -3096,10 +3188,6 @@ const ProfilePage = () => {
 
         {draft.profileTab === "matches" ? (
           <div class="profile-tab-panel match-list">
-            <div class="match-list-head">
-              <h2>最近 20 场</h2>
-              <span>{completedPlayerRooms(name).length} 场已结束</span>
-            </div>
             {completedPlayerRooms(name).length ? (
               <div class="match-rows">
                 {completedPlayerRooms(name).slice(0, 20).map((room) => {
@@ -3413,7 +3501,10 @@ const TemporaryBlockOverlay = () => (
   </div>
 );
 
-const vditorCdn = "https://cdn.jsdelivr.net/npm/vditor@3.11.2";
+// Vditor 运行时资源走同源 /vditor/3.11.2：Worker 会把 /vditor/3.11.2/dist/* 代理到 BootCDN
+// （BootCDN 上的 vditor 是无 dist/ 前缀的扁平目录，不能直接填给 vditor 的 cdn 选项），
+// 同源请求复用现有连接且经 Cloudflare 边缘缓存，加载最快。路径带版本号，升级时同步改这里与 worker。
+const vditorCdn = "/vditor/3.11.2";
 
 const loadVditor = () => {
   vditorModulePromise ??= import("vditor");
@@ -3732,12 +3823,13 @@ const submitVJudgeLogin = async (event: Event) => {
     bootPhase = "ready";
     await registerCurrentUser();
     await syncExamStatus();
-    await refreshGlobalModeration();
+    // 门禁判定先于网络请求：未通过立即跳考试页，避免中止飞行中的快照/通知请求（红色 0 B 记录）。
     if (isExamRequired() && !isExamPath()) {
       location.replace("/exam");
       notify();
       return;
     }
+    if (!isExamPath()) await refreshGlobalModeration();
     await enterFromHash();
   } catch (error) {
     authErrorText =
@@ -3882,7 +3974,7 @@ const EXAM_RULES_URL = "https://gengen.qzz.io/duel/rule";
 const EXAM_QUESTION_BANK: ExamQuestion[] = [
   { id: "q01", question: "本网站名为", options: ["VJudge Duel", "CF Duel", "Luogu Duel", "AT Duel"], correctIndex: 0 },
   { id: "q02", question: "用户的基础 rating 为", options: ["1300", "1200", "1100", "1000"], correctIndex: 0 },
-  { id: "q03", question: "如果在对决中被自动封禁系统检测到作弊，会发生什么？", options: ["处以封禁账户及棕名处罚，且 rating 降为 0", "禁赛 1 天", "扣除 100 rating", "被官方刺杀"], correctIndex: 0 },
+  { id: "q03", question: "如果在对决中被系统自动检测到作弊，会发生什么？", options: ["比赛立即终止并自动提交工单，等待管理员审查", "自动封禁账户且 rating 降为 0", "扣除 100 rating", "被官方刺杀"], correctIndex: 0 },
   { id: "q04", question: "橙名所对应的 rating 范围是", options: ["[1550,1650)", "[1550,1650]", "[1500,1600]", "[1550,1600)"], correctIndex: 0 },
   { id: "q05", question: "对决中是否可以提交之前通过的代码？", options: ["不可以", "可以", "我也不知道能不能", "我管你能不能"], correctIndex: 0 },
   { id: "q06", question: "VJudge Duel 支持的判题平台不包括哪个？", options: ["洛谷", "Codeforces", "AtCoder", "LeetCode"], correctIndex: 3 },
@@ -4431,6 +4523,8 @@ const userRecordFor = (name: string): UserRecord | null => {
 const ensureUserLoaded = async (name: string): Promise<UserRecord | null> => {
   const key = normalizeName(name);
   const cached = userCache[key];
+  // 30 分钟内命中本地缓存直接返回（CDN 已不再缓存，本地缓存兜底 + 减少请求）；
+  // 超过 30 分钟则重新请求服务器拿最新评分/战绩。
   if (cached && Date.now() - cached.cachedAt < userCacheTtl) return cached.user;
   try {
     const user = await fetchUserRecord(name);
@@ -4463,6 +4557,7 @@ const updateLocalUser = (name: string, patch: Partial<UserRecord>, renderNow = t
 const registerCurrentUser = async () => {
   if (!identity?.luoguName) return;
   const key = normalizeName(identity.luoguName);
+  // 30 分钟内已注册过则用本地缓存（减少重复写入）；超过 30 分钟重新向服务器拉取最新记录（评分/战绩）。
   const cached = userCache[key];
   if (cached && Date.now() - cached.cachedAt < userCacheTtl && registrationFresh(key)) {
     updateLocalUser(cached.user.name, cached.user, false);
@@ -4672,12 +4767,6 @@ const problemCode = (pid: string): string => pid.replace(/^P/i, "") || pid;
 const friendlyError = (error: unknown, prefix: string): string => `${prefix}: ${error instanceof Error ? error.message : String(error)}`;
 const compactId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 10);
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, Number.isFinite(n) ? n : min));
-const timeAgo = (time: number): string => {
-  const minutes = Math.max(0, Math.floor((Date.now() - time) / 60_000));
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
-  return `${Math.floor(minutes / 60)} 小时前`;
-};
 
 function readStoredNumber(key: string, fallback = 0): number {
   try {
@@ -4735,4 +4824,812 @@ function applyTemporaryMute(durationMs: number): void {
 }
 
 notify();
+// ============ 工单系统 (Ticket System) ============
+
+type TicketProject = "vjudge-duel" | "gengen-rmj";
+type TicketType = "appeal" | "report" | "suggestion" | "bug";
+type TicketStatus = "open" | "processing" | "closed" | "done";
+type TicketRow = {
+  id: string;
+  project: TicketProject;
+  type: TicketType;
+  title: string;
+  description: string;
+  author: string;
+  authorId: string;
+  status: TicketStatus;
+  assignee: string | null;
+  createdAt: number;
+  updatedAt: number;
+  closedAt: number | null;
+  closedReason: string | null;
+  replyCount: number;
+  lastReplyAt: number | null;
+};
+type TicketComment = {
+  id: string;
+  ticketId: string;
+  author: string;
+  authorId: string;
+  body: string;
+  createdAt: number;
+  mentions: string[];
+};
+type TicketNotification = {
+  id: string;
+  recipient: string;
+  ticketId: string;
+  ticketTitle: string;
+  kind: "reply" | "mention" | "status" | "assign" | "system";
+  text: string;
+  read: boolean;
+  createdAt: number;
+  link?: string | null;
+};
+
+let ticketView: "list" | "new" | "detail" = "list";
+let ticketList: TicketRow[] = [];
+let ticketListLoading = false;
+let ticketFilters = { project: "" as "" | TicketProject, type: "" as "" | TicketType, status: "" as "" | TicketStatus, q: "", mine: false };
+let ticketDetail: TicketRow | null = null;
+let ticketDetailId = "";
+let ticketComments: TicketComment[] = [];
+let ticketDetailLoading = false;
+let ticketWizard = { step: 1 as 1 | 2 | 3, project: "" as "" | TicketProject, type: "" as "" | TicketType, title: "", description: "" };
+let ticketSimilar: TicketRow[] = [];
+let ticketSimilarLoading = false;
+let ticketCommentDraft = "";
+let ticketAssigneeDraft = "";
+let ticketClosedReasonDraft = "";
+let ticketNotifications: TicketNotification[] = [];
+let ticketUnread = 0;
+let ticketNotifOpen = false;
+let ticketNotifClosing = false;
+let ticketSearchTimer: number | undefined;
+let adminNameList: string[] = [];
+// 工单创建者编辑模式
+let ticketEditing = false;
+let ticketEditTitle = "";
+let ticketEditDescription = "";
+let ticketEditSaving = false;
+
+const ticketTypeLabel = (type: TicketType): string =>
+  type === "appeal" ? "申诉" : type === "report" ? "举报用户" : type === "suggestion" ? "建议" : "Bug";
+const ticketStatusLabel = (status: TicketStatus): string =>
+  status === "open" ? "待处理" : status === "processing" ? "处理中" : status === "closed" ? "已关闭" : "已完成";
+const ticketProjectLabel = (project: TicketProject): string => project === "vjudge-duel" ? "VJudge Duel" : "GenGen RMJ";
+const timeAgo = (ts: number): string => {
+  const diff = Date.now() - ts;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} 天前`;
+  return new Date(ts).toLocaleDateString();
+};
+
+type MdHolder = { current: VditorType | null; generation: number; target: HTMLElement | null };
+const makeMdHolder = (): MdHolder => ({ current: null, generation: 0, target: null });
+const ticketMd = makeMdHolder();
+const commentMd = makeMdHolder();
+const editMd = makeMdHolder();
+
+const mountMdEditor = async (holder: MdHolder, target: HTMLElement, opts: { value: string; onChange: (value: string) => void; minHeight?: number; placeholder?: string }): Promise<void> => {
+  if (holder.current && holder.target === target) {
+    try { holder.current.enable(); } catch { /* ignore */ }
+    return;
+  }
+  holder.generation += 1;
+  const myGen = holder.generation;
+  try { holder.current?.destroy(); } catch { /* ignore */ }
+  holder.current = null;
+  holder.target = target;
+  const { default: Vditor } = await loadVditor();
+  if (myGen !== holder.generation || !target.isConnected) return;
+  let editor: VditorType;
+  editor = new Vditor(target, {
+    ...vditorWysiwygWorkaround,
+    mode: "wysiwyg",
+    value: opts.value,
+    lang: "zh_CN",
+    cdn: vditorCdn,
+    theme: currentVditorTheme() === "dark" ? "dark" : "classic",
+    minHeight: opts.minHeight ?? 140,
+    placeholder: opts.placeholder ?? "",
+    cache: { enable: false },
+    counter: { enable: true, max: 20000, type: "markdown" },
+    toolbar: ["headings", "bold", "italic", "strike", "|", "quote", "list", "ordered-list", "check", "|", "link", "image", "code", "inline-code", "|", "undo", "redo", "fullscreen"],
+    preview: vditorPreviewOptions(),
+    input: (value: string) => { opts.onChange(value); },
+    after: () => {
+      if (myGen !== holder.generation || !target.isConnected) { try { editor.destroy(); } catch { /* ignore */ } return; }
+      holder.current = editor;
+      // 步骤切换/面板入场动画会让 vditor 初次测量的宽度偏小导致工具栏/内容错位。
+      // Vditor 并没有 resize() 方法（之前调的是个不存在的 no-op，等于没修），
+      // 改用 setValue(getValue()) 强制重渲染内容以按当前容器尺寸重测布局。
+      const reflow = (): void => {
+        try { editor.setValue(editor.getValue(), true); } catch { /* ignore */ }
+      };
+      window.setTimeout(reflow, 160);
+      window.setTimeout(reflow, 520);
+    }
+  } as ConstructorParameters<typeof Vditor>[1]);
+};
+
+const ticketMdRef = (element: HTMLElement | null) => {
+  if (element) {
+    void mountMdEditor(ticketMd, element, {
+      value: ticketWizard.description,
+      onChange: (value) => { ticketWizard = { ...ticketWizard, description: value }; },
+      minHeight: 240,
+      placeholder: "请用 Markdown 描述问题，便于复现请使用图片（Markdown 插入图片）…"
+    });
+    return;
+  }
+  queueMicrotask(() => {
+    if (ticketMd.target && !ticketMd.target.isConnected) {
+      // 销毁前同步一次当前值，避免 input 回调未触发导致描述丢失（返回上一步/预览时内容不丢）。
+      const current = ticketMd.current?.getValue();
+      if (typeof current === "string") ticketWizard = { ...ticketWizard, description: current };
+      try { ticketMd.current?.destroy(); } catch { /* ignore */ }
+      ticketMd.current = null;
+      ticketMd.target = null;
+    }
+  });
+};
+
+const commentMdRef = (element: HTMLElement | null) => {
+  if (element) {
+    void mountMdEditor(commentMd, element, {
+      value: "",
+      onChange: (value) => { ticketCommentDraft = value; },
+      minHeight: 120,
+      placeholder: "回复工单，支持 Markdown，使用 @用户名 可提醒对方…"
+    });
+    return;
+  }
+  queueMicrotask(() => {
+    if (commentMd.target && !commentMd.target.isConnected) {
+      try { commentMd.current?.destroy(); } catch { /* ignore */ }
+      commentMd.current = null;
+      commentMd.target = null;
+    }
+  });
+};
+
+const editMdRef = (element: HTMLElement | null) => {
+  if (element) {
+    void mountMdEditor(editMd, element, {
+      value: ticketEditDescription,
+      onChange: (value) => { ticketEditDescription = value; },
+      minHeight: 200,
+      placeholder: "编辑工单描述，支持 Markdown…"
+    });
+    return;
+  }
+  queueMicrotask(() => {
+    if (editMd.target && !editMd.target.isConnected) {
+      const current = editMd.current?.getValue();
+      if (typeof current === "string") ticketEditDescription = current;
+      try { editMd.current?.destroy(); } catch { /* ignore */ }
+      editMd.current = null;
+      editMd.target = null;
+    }
+  });
+};
+
+const apiTicket = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<Response> => {
+  const init: RequestInit = { method, headers: { "content-type": "application/json", ...headers } };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  return fetch(path, init);
+};
+
+const loadTickets = async (): Promise<void> => {
+  ticketListLoading = true;
+  notify();
+  try {
+    const params = new URLSearchParams();
+    if (ticketFilters.project) params.set("project", ticketFilters.project);
+    if (ticketFilters.type) params.set("type", ticketFilters.type);
+    if (ticketFilters.status) params.set("status", ticketFilters.status);
+    if (ticketFilters.q.trim()) params.set("q", ticketFilters.q.trim());
+    if (ticketFilters.mine && identity) params.set("author", identity.luoguName);
+    const res = await apiTicket("GET", `/api/tickets?${params.toString()}`);
+    const data = await res.json() as { tickets?: TicketRow[] };
+    ticketList = data.tickets ?? [];
+  } catch {
+    ticketList = [];
+  } finally {
+    ticketListLoading = false;
+    notify();
+  }
+};
+
+const loadTicket = async (id: string): Promise<void> => {
+  ticketDetailLoading = true;
+  notify();
+  try {
+    const res = await apiTicket("GET", `/api/tickets/${encodeURIComponent(id)}`);
+    const data = await res.json() as { ticket?: TicketRow; comments?: TicketComment[] };
+    ticketDetail = data.ticket ?? null;
+    ticketComments = data.comments ?? [];
+    ticketClosedReasonDraft = data.ticket?.closedReason ?? "";
+  } catch {
+    ticketDetail = null;
+    ticketComments = [];
+  } finally {
+    ticketDetailLoading = false;
+    notify();
+  }
+};
+
+const createTicket = async (): Promise<boolean> => {
+  if (!identity) return false;
+  const title = ticketWizard.title.trim();
+  const description = ticketWizard.description.trim();
+  if (!ticketWizard.project || !ticketWizard.type) { setStatus("请选择项目与类型", "error"); return false; }
+  if (title.length < 5 || title.length > 100) { setStatus("标题长度需为 5-100 字符", "error"); return false; }
+  if (!description) { setStatus("工单描述不能为空", "error"); return false; }
+  try {
+    const res = await apiTicket("POST", "/api/tickets", {
+      project: ticketWizard.project,
+      type: ticketWizard.type,
+      title,
+      description,
+      author: identity.luoguName,
+      authorId: identity.id
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null) as { error?: string } | null;
+      setStatus(err?.error ?? "工单创建失败", "error");
+      return false;
+    }
+    const data = await res.json() as { ticket?: TicketRow };
+    const id = data.ticket?.id ?? "";
+    ticketWizard = { step: 1, project: "", type: "", title: "", description: "" };
+    ticketSimilar = [];
+    if (id) enterTicketDetail(id);
+    void loadTicketNotifications();
+    return true;
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "工单创建失败", "error");
+    return false;
+  }
+};
+
+const addTicketComment = async (): Promise<void> => {
+  if (!identity || !ticketDetail) return;
+  const body = (commentMd.current?.getValue() ?? ticketCommentDraft).trim();
+  if (!body) { setStatus("评论内容不能为空", "error"); return; }
+  try {
+    const res = await apiTicket("POST", `/api/tickets/${encodeURIComponent(ticketDetail.id)}/comments`, {
+      author: identity.luoguName,
+      authorId: identity.id,
+      body
+    });
+    const data = await res.json() as { ticket?: TicketRow; comments?: TicketComment[] };
+    if (data.ticket) ticketDetail = data.ticket;
+    if (data.comments) ticketComments = data.comments;
+    ticketCommentDraft = "";
+    try { commentMd.current?.setValue("", true); } catch { /* ignore */ }
+    void loadTicketNotifications();
+    notify();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "评论失败", "error");
+  }
+};
+
+const updateTicketAdmin = async (patch: { status?: TicketStatus; assignee?: string | null; closedReason?: string }): Promise<void> => {
+  if (!ticketDetail || !isAdmin() || !identity) return;
+  try {
+    const res = await apiTicket("PATCH", `/api/tickets/${encodeURIComponent(ticketDetail.id)}`, patch, { "x-admin-name": identity.luoguName });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null) as { error?: string } | null;
+      setStatus(err?.error ?? "更新失败", "error");
+      return;
+    }
+    const data = await res.json() as { ticket?: TicketRow };
+    if (data.ticket) ticketDetail = data.ticket;
+    if (patch.assignee !== undefined) ticketAssigneeDraft = "";
+    void loadTicketNotifications();
+    notify();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "更新失败", "error");
+  }
+};
+
+// 工单创建者（或管理员）编辑标题/描述。
+const saveTicketEdit = async (): Promise<void> => {
+  if (!ticketDetail || !identity) return;
+  const title = ticketEditTitle.trim();
+  const description = (editMd.current?.getValue() ?? ticketEditDescription).trim();
+  if (title.length < 5 || title.length > 100) { setStatus("标题长度需为 5-100 字符", "error"); return; }
+  if (!description) { setStatus("工单描述不能为空", "error"); return; }
+  ticketEditSaving = true;
+  notify();
+  try {
+    const res = await apiTicket("PATCH", `/api/tickets/${encodeURIComponent(ticketDetail.id)}/content`, { title, description }, { "x-actor-name": identity.luoguName });
+    const data = await res.json() as { ticket?: TicketRow };
+    if (!res.ok || !data.ticket) {
+      const err = data as { error?: string } | null;
+      setStatus(err?.error ?? "保存失败", "error");
+      return;
+    }
+    ticketDetail = data.ticket;
+    ticketEditing = false;
+    ticketEditTitle = "";
+    ticketEditDescription = "";
+    setStatus("已保存", "info");
+    notify();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "保存失败", "error");
+  } finally {
+    ticketEditSaving = false;
+    notify();
+  }
+};
+
+const deleteTicketAdmin = async (): Promise<void> => {
+  if (!ticketDetail || !isAdmin() || !identity) return;
+  const ok = await new Promise<boolean>((resolve) =>
+    Swal.fire({
+      title: "删除工单？",
+      text: "工单及其所有评论、通知将被永久删除，无法恢复。",
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "删除",
+      cancelButtonText: "取消"
+    }).then((result) => resolve(result.isConfirmed))
+  );
+  if (!ok) return;
+  try {
+    const res = await apiTicket("DELETE", `/api/tickets/${encodeURIComponent(ticketDetail.id)}`, null, { "x-admin-name": identity.luoguName });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null) as { error?: string } | null;
+      setStatus(err?.error ?? "删除失败", "error");
+      return;
+    }
+    setStatus("工单已删除", "info");
+    ticketView = "list";
+    ticketDetail = null;
+    ticketComments = [];
+    location.hash = "tickets=1";
+    void loadTicketNotifications();
+    notify();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "删除失败", "error");
+  }
+};
+
+const loadTicketNotifications = async (): Promise<void> => {
+  if (!identity) return;
+  try {
+    const res = await apiTicket("GET", `/api/notifications?name=${encodeURIComponent(identity.luoguName)}`);
+    const data = await res.json() as { notifications?: TicketNotification[]; unread?: number };
+    ticketNotifications = data.notifications ?? [];
+    ticketUnread = data.unread ?? 0;
+    notify();
+  } catch { /* ignore */ }
+};
+
+const loadAdminNames = async (): Promise<void> => {
+  try {
+    const res = await fetch("/api/admin-names");
+    const data = await res.json() as { names?: string[] };
+    adminNameList = data.names ?? [];
+    notify();
+  } catch { /* ignore */ }
+};
+
+const markNotifRead = async (id: string): Promise<void> => {
+  try { await apiTicket("POST", `/api/notifications/${encodeURIComponent(id)}/read`); } catch { /* ignore */ }
+  ticketNotifications = ticketNotifications.map((item) => item.id === id ? { ...item, read: true } : item);
+  ticketUnread = ticketNotifications.filter((item) => !item.read).length;
+  notify();
+};
+
+const markAllNotifRead = async (): Promise<void> => {
+  if (!identity) return;
+  try { await apiTicket("POST", "/api/notifications/read-all", { name: identity.luoguName }); } catch { /* ignore */ }
+  ticketNotifications = ticketNotifications.map((item) => ({ ...item, read: true }));
+  ticketUnread = 0;
+  notify();
+};
+
+const openTicketDetail = (id: string): void => {
+  mode = "tickets";
+  roomId = "global";
+  roomSecret = "public-lobby";
+  ticketView = "detail";
+  ticketDetailId = id;
+  ticketCommentDraft = "";
+  ticketAssigneeDraft = "";
+  ticketClosedReasonDraft = "";
+  notify();
+  void loadTicket(id);
+};
+
+const enterTicketDetail = (id: string): void => {
+  if (!id) return;
+  const target = `ticket=${encodeURIComponent(id)}`;
+  if (location.hash === `#${target}`) {
+    openTicketDetail(id);
+    return;
+  }
+  location.hash = target;
+};
+
+const startTicketWizard = (): void => {
+  ticketView = "new";
+  ticketWizard = { step: 1, project: "", type: "", title: "", description: "" };
+  ticketSimilar = [];
+  notify();
+};
+
+const goTicketStep = (step: 1 | 2 | 3): void => {
+  if (step === 2 && (!ticketWizard.project || !ticketWizard.type)) { setStatus("请先选择项目与类型", "error"); return; }
+  // 离开第 2 步前，同步一次编辑器当前值，确保预览/提交拿到最新描述（不依赖 input 回调时序）。
+  if (ticketWizard.step === 2 && step !== 2) {
+    const current = ticketMd.current?.getValue();
+    if (typeof current === "string") ticketWizard = { ...ticketWizard, description: current };
+  }
+  ticketWizard = { ...ticketWizard, step };
+  notify();
+};
+
+const searchSimilarTickets = async (q: string): Promise<void> => {
+  const term = q.trim();
+  // 极宽松匹配：只要有一个相同字符就展示，服务端按相关性排序。
+  if (term.length < 1) { ticketSimilar = []; notify(); return; }
+  ticketSimilarLoading = true;
+  notify();
+  try {
+    const res = await apiTicket("GET", `/api/tickets?q=${encodeURIComponent(term)}`);
+    const data = await res.json() as { tickets?: TicketRow[] };
+    ticketSimilar = (data.tickets ?? []).filter((item) => item.id !== ticketDetailId).slice(0, 5);
+  } catch {
+    ticketSimilar = [];
+  } finally {
+    ticketSimilarLoading = false;
+    notify();
+  }
+};
+
+const onTitleInput = (value: string): void => {
+  ticketWizard = { ...ticketWizard, title: value };
+  notify();
+  if (ticketSearchTimer) window.clearTimeout(ticketSearchTimer);
+  ticketSearchTimer = window.setTimeout(() => void searchSimilarTickets(value), 300);
+};
+
+const closeNotificationDrawer = (): void => {
+  if (!ticketNotifOpen || ticketNotifClosing) return;
+  ticketNotifClosing = true;
+  notify();
+};
+
+function NotificationBell(): JSX.Element {
+  return (
+    <button class="ghost icon-only notif-bell" onClick={() => {
+      ticketNotifOpen = true;
+      ticketNotifClosing = false;
+      void loadTicketNotifications();
+      notify();
+    }} title="通知中心">
+      <Bell size={16} />
+      {ticketUnread > 0 ? <span class="notif-badge">{ticketUnread > 99 ? "99+" : ticketUnread}</span> : null}
+    </button>
+  );
+}
+
+function NotificationDrawer(): JSX.Element | null {
+  if (!ticketNotifOpen && !ticketNotifClosing) return null;
+  const closing = ticketNotifClosing;
+  return (
+    <div class={`notif-overlay${closing ? " closing" : ""}`}
+      onClick={(event) => { if (event.target === event.currentTarget) closeNotificationDrawer(); }}
+      onAnimationEnd={(event) => {
+        if (closing && event.target === event.currentTarget && event.animationName === "notif-overlay-out") {
+          ticketNotifOpen = false;
+          ticketNotifClosing = false;
+          notify();
+        }
+      }}>
+      <div class={`notif-drawer${closing ? " closing" : ""}`}>
+        <header class="notif-drawer-head">
+          <h2><Bell size={16} />通知中心</h2>
+          <div class="notif-drawer-actions">
+            {ticketUnread > 0 ? <button class="mini-btn" onClick={() => void markAllNotifRead()}>全部已读</button> : null}
+            <button class="ghost icon-only" onClick={() => closeNotificationDrawer()}><X size={16} /></button>
+          </div>
+        </header>
+        <ul class="notif-list">
+          {ticketNotifications.length === 0 ? <li class="muted notif-empty">暂无通知。</li>
+            : ticketNotifications.map((item) => (
+              <li key={item.id} class={`notif-item ${item.read ? "" : "unread"}`} onClick={() => {
+                void markNotifRead(item.id);
+                closeNotificationDrawer();
+                if (item.link) location.hash = item.link;
+                else if (item.ticketId) enterTicketDetail(item.ticketId);
+              }}>
+                <span class={`notif-kind kind-${item.kind}`}>{item.kind === "mention" ? "@" : item.kind === "status" || item.kind === "system" ? "系统" : item.kind === "assign" ? "指派" : "回复"}</span>
+                <div class="notif-text">
+                  <p>{item.text}</p>
+                  <span class="muted">{timeAgo(item.createdAt)}</span>
+                </div>
+                {!item.read ? <span class="notif-dot" /> : null}
+              </li>
+            ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function TicketsPage(): JSX.Element {
+  return (
+    <main class="tickets-page">
+      <header class="tickets-head">
+        <div>
+          <h1>工单中心</h1>
+          <p>反馈问题、提交申诉或建议。提交前请先搜索是否已有相似工单。</p>
+        </div>
+        <div class="tickets-head-actions">
+          <button class="primary" onClick={() => startTicketWizard()}><Ticket size={15} />发起工单</button>
+        </div>
+      </header>
+      {ticketView === "new" ? <TicketWizard /> : ticketView === "detail" ? <TicketDetail /> : <TicketList />}
+    </main>
+  );
+}
+
+function TicketList(): JSX.Element {
+  return (
+    <section class="panel tickets-panel">
+      <div class="tickets-filters">
+        <select value={ticketFilters.project} onInput={(event) => { ticketFilters.project = event.currentTarget.value as "" | TicketProject; notify(); void loadTickets(); }}>
+          <option value="">全部项目</option>
+          <option value="vjudge-duel">VJudge Duel</option>
+          <option value="gengen-rmj">GenGen RMJ</option>
+        </select>
+        <select value={ticketFilters.type} onInput={(event) => { ticketFilters.type = event.currentTarget.value as "" | TicketType; notify(); void loadTickets(); }}>
+          <option value="">全部类型</option>
+          <option value="appeal">申诉</option>
+          <option value="report">举报用户</option>
+          <option value="suggestion">建议</option>
+          <option value="bug">Bug</option>
+        </select>
+        <select value={ticketFilters.status} onInput={(event) => { ticketFilters.status = event.currentTarget.value as "" | TicketStatus; notify(); void loadTickets(); }}>
+          <option value="">全部状态</option>
+          <option value="open">待处理</option>
+          <option value="processing">处理中</option>
+          <option value="closed">已关闭</option>
+          <option value="done">已完成</option>
+        </select>
+        <input type="search" placeholder="搜索标题…" value={ticketFilters.q} onInput={(event) => { ticketFilters.q = event.currentTarget.value; notify(); void loadTickets(); }} />
+        <label class="tickets-mine"><input type="checkbox" checked={ticketFilters.mine} onInput={(event) => { ticketFilters.mine = event.currentTarget.checked; notify(); void loadTickets(); }} />我发起的</label>
+      </div>
+      {ticketListLoading ? <p class="muted tickets-empty">加载中…</p>
+        : ticketList.length === 0 ? <p class="muted tickets-empty">暂无工单。点击右上角“发起工单”提交第一个。</p>
+        : <ul class="ticket-list">
+            {ticketList.map((item) => (
+              <li key={item.id} class="ticket-row" onClick={() => void enterTicketDetail(item.id)}>
+                <div class="ticket-row-main">
+                  <span class={`ticket-type type-${item.type}`}>{ticketTypeLabel(item.type)}</span>
+                  <span class={`ticket-project project-${item.project}`}>{ticketProjectLabel(item.project)}</span>
+                  <strong class="ticket-title">{item.title}</strong>
+                </div>
+                <div class="ticket-row-meta">
+                  <span class={`ticket-status status-${item.status}`}>{ticketStatusLabel(item.status)}</span>
+                  <span class="muted">{item.author}</span>
+                  <span class="muted">{item.replyCount} 回复</span>
+                  <span class="muted">{timeAgo(item.updatedAt)}</span>
+                </div>
+              </li>
+            ))}
+          </ul>}
+    </section>
+  );
+}
+
+function TicketWizard(): JSX.Element {
+  const w = ticketWizard;
+  return (
+    <section class="panel ticket-wizard">
+      <div class="wizard-steps">
+        <span class={w.step >= 1 ? "active" : ""}><b>1</b> 选择分类</span>
+        <span class={w.step >= 2 ? "active" : ""}><b>2</b> 填写内容</span>
+        <span class={w.step >= 3 ? "active" : ""}><b>3</b> 预览提交</span>
+      </div>
+      {w.step === 1 ? (
+        <div class="wizard-step" key="step-1">
+          <h2>综合问题</h2>
+          <div class="wizard-field">
+            <label>1. 选择项目</label>
+            <div class="option-grid">
+              <button class={`option ${w.project === "vjudge-duel" ? "selected" : ""}`} onClick={() => { ticketWizard = { ...w, project: "vjudge-duel" }; notify(); }}><Building2 size={16} />VJudge Duel</button>
+              <button class={`option ${w.project === "gengen-rmj" ? "selected" : ""}`} onClick={() => { ticketWizard = { ...w, project: "gengen-rmj", type: w.type === "appeal" || w.type === "report" ? "" : w.type }; notify(); }}><Terminal size={16} />GenGen RMJ</button>
+            </div>
+          </div>
+          <div class="wizard-field">
+            <label>2. 选择类型</label>
+            <div class="option-grid option-grid-4">
+              <button class={`option ${w.type === "appeal" ? "selected" : ""} ${w.project !== "vjudge-duel" ? "disabled" : ""}`} disabled={w.project !== "vjudge-duel"} onClick={() => { if (w.project === "vjudge-duel") { ticketWizard = { ...w, type: "appeal" }; notify(); } }}><Flag size={16} />申诉{w.project !== "vjudge-duel" ? <em class="muted"> · 仅 VJudge Duel</em> : null}</button>
+              <button class={`option ${w.type === "report" ? "selected" : ""} ${w.project !== "vjudge-duel" ? "disabled" : ""}`} disabled={w.project !== "vjudge-duel"} onClick={() => { if (w.project === "vjudge-duel") { ticketWizard = { ...w, type: "report" }; notify(); } }}><UserMinus size={16} />举报用户{w.project !== "vjudge-duel" ? <em class="muted"> · 仅 VJudge Duel</em> : null}</button>
+              <button class={`option ${w.type === "suggestion" ? "selected" : ""}`} onClick={() => { ticketWizard = { ...w, type: "suggestion" }; notify(); }}><MessageSquare size={16} />建议</button>
+              <button class={`option ${w.type === "bug" ? "selected" : ""}`} onClick={() => { ticketWizard = { ...w, type: "bug" }; notify(); }}><AlertTriangle size={16} />Bug</button>
+            </div>
+          </div>
+          <div class="wizard-actions">
+            <button class="ghost" onClick={() => { ticketView = "list"; notify(); }}>取消</button>
+            <button class="primary" disabled={!w.project || !w.type} onClick={() => goTicketStep(2)}>下一步</button>
+          </div>
+        </div>
+      ) : w.step === 2 ? (
+        <div class="wizard-step" key="step-2">
+          <div class="wizard-field">
+            <label>工单标题</label>
+            <input type="text" value={w.title} placeholder="一句话概括问题（5-100 字符）" onInput={(event) => onTitleInput(event.currentTarget.value)} maxLength={120} />
+            <div class="title-meta">
+              <span class={w.title.trim().length < 5 || w.title.trim().length > 100 ? "title-warn" : "title-ok"}>长度 {w.title.trim().length}/100（标题长度限制 5-100 字符）</span>
+            </div>
+            <p class="muted wizard-hint">在提出工单前，请先在搜索栏中搜索相关问题，避免重复工单。</p>
+            {ticketSimilarLoading ? <p class="muted">搜索相似工单中…</p>
+              : ticketSimilar.length > 0 ? (
+                <div class="similar-box">
+                  <p class="similar-title">找到相似工单：</p>
+                  <ul>
+                    {ticketSimilar.map((item) => (
+                      <li key={item.id}><button class="link-btn" onClick={() => void enterTicketDetail(item.id)}>{item.title}</button><span class="muted"> · {ticketStatusLabel(item.status)}</span></li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+          </div>
+          <div class="wizard-field">
+            <label>工单描述</label>
+            <div class="vditor-host" ref={ticketMdRef} />
+            <p class="muted wizard-hint">支持 Markdown（veditor）。如需贴图复现，请用 Markdown 语法插入图片（如 <code>![描述](图片链接)</code>）。</p>
+          </div>
+          <p class="ticket-warn"><AlertTriangle size={14} />标题不够清晰及无意义工单将会被关单，多次发起此类工单将会被封禁，请合理使用工单功能。</p>
+          <div class="wizard-actions">
+            <button class="ghost" onClick={() => goTicketStep(1)}><ArrowLeft size={15} />上一步</button>
+            <button class="primary" disabled={w.title.trim().length < 5 || w.title.trim().length > 100 || !w.description.trim()} onClick={() => goTicketStep(3)}>下一步：预览</button>
+          </div>
+        </div>
+      ) : (
+        <div class="wizard-step" key="step-3">
+          <h2>预览</h2>
+          <div class="preview-card">
+            <div class="preview-row"><span class="muted">工单标题</span><strong>{w.title}</strong></div>
+            <div class="preview-row"><span class="muted">工单类型</span><span><span class={`ticket-type type-${w.type}`}>{ticketTypeLabel(w.type as TicketType)}</span> <span class={`ticket-project project-${w.project}`}>{ticketProjectLabel(w.project as TicketProject)}</span></span></div>
+            <div class="preview-row preview-desc"><span class="muted">工单描述</span><div><RichText text={w.description} /></div></div>
+          </div>
+          <div class="wizard-actions">
+            <button class="ghost" onClick={() => goTicketStep(2)}><ArrowLeft size={15} />上一步</button>
+            <button class="primary" onClick={() => void createTicket()}><Check size={15} />提交工单</button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TicketDetail(): JSX.Element {
+  if (ticketDetailLoading && !ticketDetail) return <p class="muted tickets-empty">加载中…</p>;
+  if (!ticketDetail) return <p class="muted tickets-empty">工单不存在或已删除。<button class="link-btn" onClick={() => { location.hash = "tickets=1"; }}>返回列表</button></p>;
+  const t = ticketDetail;
+  const canEdit = Boolean(identity) && (isAdmin() || identity.luoguName === t.author);
+  return (
+    <section class="panel ticket-detail">
+      <div class="detail-head">
+        <button class="ghost" onClick={() => { location.hash = "tickets=1"; }}><ArrowLeft size={15} />返回</button>
+        <div class="detail-badges">
+          <span class={`ticket-type type-${t.type}`}>{ticketTypeLabel(t.type)}</span>
+          <span class={`ticket-project project-${t.project}`}>{ticketProjectLabel(t.project)}</span>
+          <span class={`ticket-status status-${t.status}`}>{ticketStatusLabel(t.status)}</span>
+        </div>
+      </div>
+      <h1 class="detail-title">{ticketEditing ? null : t.title}</h1>
+      <div class="detail-meta muted">
+        <span>提交人 {t.author}</span>
+        <span>· {timeAgo(t.createdAt)}</span>
+        {t.assignee ? <span>· 责任人 {t.assignee}</span> : null}
+        {t.closedReason ? <span>· 关单原因：{t.closedReason}</span> : null}
+      </div>
+
+      {ticketEditing && canEdit ? (
+        <div class="ticket-edit-box" key="edit-box">
+          <div class="wizard-field">
+            <label>标题</label>
+            <input type="text" value={ticketEditTitle} placeholder="一句话概括问题（5-100 字符）" maxLength={120} onInput={(event) => { ticketEditTitle = event.currentTarget.value; notify(); }} />
+          </div>
+          <div class="wizard-field">
+            <label>描述</label>
+            <div class="vditor-host" ref={editMdRef} />
+          </div>
+          <div class="wizard-actions">
+            <button class="ghost" onClick={() => { ticketEditing = false; ticketEditTitle = ""; ticketEditDescription = ""; notify(); }}><ArrowLeft size={15} />取消</button>
+            <button class="primary" disabled={ticketEditSaving || ticketEditTitle.trim().length < 5 || ticketEditTitle.trim().length > 100} onClick={() => void saveTicketEdit()}><Check size={15} />保存修改</button>
+          </div>
+        </div>
+      ) : (
+        <div class="detail-desc" key="desc"><RichText text={t.description} />
+          {canEdit ? (
+            <div class="detail-actions">
+              <button class="mini-btn" onClick={() => { ticketEditing = true; ticketEditTitle = t.title; ticketEditDescription = t.description; notify(); }}><Pencil size={13} />编辑内容</button>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {isAdmin() ? (
+        <div class="admin-ticket-controls">
+          <div class="admin-control-row">
+            <span class="muted">状态</span>
+            {(["open", "processing", "closed", "done"] as TicketStatus[]).map((s) => (
+              <button key={s} class={`mini-btn ${t.status === s ? "active" : ""}`} onClick={() => void updateTicketAdmin({ status: s, closedReason: s === "closed" ? (t.closedReason ?? "") : undefined })}>{ticketStatusLabel(s)}</button>
+            ))}
+          </div>
+          <div class="admin-control-row">
+            <span class="muted">责任人</span>
+            <select value={ticketAssigneeDraft || t.assignee || ""} onInput={(event) => { ticketAssigneeDraft = event.currentTarget.value; notify(); }}>
+              <option value="">未指派</option>
+              {adminNameList.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+            <button class="mini-btn" onClick={() => void updateTicketAdmin({ assignee: ticketAssigneeDraft || null })}>设置</button>
+            {t.assignee ? <button class="mini-btn danger" onClick={() => void updateTicketAdmin({ assignee: null })}>清除</button> : null}
+          </div>
+          {t.status === "closed" ? (
+            <div class="admin-control-row">
+              <span class="muted">关单原因</span>
+              <input type="text" placeholder="关单原因" value={ticketClosedReasonDraft} onInput={(event) => { ticketClosedReasonDraft = event.currentTarget.value; notify(); }} />
+              <button class="mini-btn" onClick={() => void updateTicketAdmin({ status: "closed", closedReason: ticketClosedReasonDraft })}>更新原因</button>
+            </div>
+          ) : null}
+          <div class="admin-control-row">
+            <span class="muted">管理</span>
+            <button class="mini-btn danger" onClick={() => void deleteTicketAdmin()}>删除工单</button>
+          </div>
+          {t.type === "report" ? (() => {
+            const reported = parseReportedUser(t.title);
+            return reported ? (
+              <div class="admin-control-row">
+                <span class="muted">作弊处理</span>
+                <button class="mini-btn danger" onClick={() => void banUserFromTicket(reported)}>封禁 {reported}</button>
+                <button class="mini-btn danger" onClick={() => void resetRatingFromTicket(reported)}>清零 {reported} Rating</button>
+              </div>
+            ) : null;
+          })() : null}
+        </div>
+      ) : null}
+
+      <div class="comments-head"><MessageSquare size={16} />讨论（{t.replyCount}）</div>
+      <ul class="comment-list">
+        {ticketComments.length === 0 ? <li class="muted comment-empty">还没有人回复，来发表第一条评论吧。</li>
+          : ticketComments.map((item) => (
+            <li key={item.id} class="comment-item">
+              <UserAvatar name={item.author} className="chat-avatar" />
+              <div class="comment-body">
+                <div class="comment-meta"><strong style={{ color: nameColor(item.author) }}>{item.author}</strong><span class="muted">{timeAgo(item.createdAt)}</span></div>
+                <RichText text={item.body} />
+              </div>
+            </li>
+          ))}
+      </ul>
+      <div class="comment-editor">
+        <div class="vditor-host" ref={commentMdRef} />
+        <div class="comment-actions">
+          <span class="muted">支持 Markdown，使用 @用户名 可提醒对方。</span>
+          <button class="primary" onClick={() => void addTicketComment()}><Send size={15} />回复</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+setInterval(() => { if (bootPhase === "ready" && identity) void loadTicketNotifications(); }, 30_000);
+
 void boot();

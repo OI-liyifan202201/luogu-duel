@@ -6,6 +6,7 @@ import type { DuelEvent, FeedRecord, Problem, SignedEnvelope } from "./types";
 
 type Env = {
   DUEL_ROOM: DurableObjectNamespace<DuelRoom>;
+  TICKET_STORE: DurableObjectNamespace<TicketStore>;
   ASSETS: Fetcher;
   API_RATE_LIMITER: RateLimit;
   JUDGE_RATE_LIMITER: RateLimit;
@@ -54,6 +55,13 @@ type SocketKind = "room" | "directory";
 const adminNames = new Set(["general0826", "slmxf", "liyifan202201", "gcend", "gcsg01","imzfx_square"]);
 const DATA_RETENTION_MS = 3 * 24 * 60 * 60_000;
 const DIRECTORY_PRUNE_INTERVAL_MS = 24 * 60 * 60_000;
+// 内部系统调用（房间 DO 调用工单 DO 自动建单）的鉴权头，避免外部伪造自动举报工单。
+const INTERNAL_CLAIM = "vdsystem-internal-claim-7c2e9a";
+// 作弊终止时写入 close reason 的分隔符，用于从事件流解析作弊者姓名。
+const CHEAT_CLOSE_SEPARATOR = "｜";
+// 自动举报工单的固定作者 / 责任人 / 状态。
+const CHEAT_TICKET_AUTHOR = "VDsystem";
+const CHEAT_TICKET_ASSIGNEE = "Gcend";
 
 export class DuelRoom extends DurableObject<Env> {
   private eventsCache: SignedEnvelope[] | null = null;
@@ -61,14 +69,10 @@ export class DuelRoom extends DurableObject<Env> {
   private cachedState = createInitialState("");
   private firstEvent: DuelEvent | null = null;
   private roomSecret: string | null = null;
-  // 比赛开始的服务器时间戳。detectCheatAndBan 用它而非客户端 startedAt 计算 elapsed，
+  // 比赛开始的服务器时间戳。detectCheatAndReport 用它而非客户端 startedAt 计算 elapsed，
   // 避免"VJudge 提交时间(record.at) vs 客户端比赛开始时间"跨时钟比较在客户端时钟偏慢时
   // 把 30s AC 算成 >=180s 从而漏判。服务端(Cloudflare)与 VJudge 均为 NTP 同步，偏差很小。
   private matchStartServerMs: number | null = null;
-  // 作弊检测广播顺序锁：在 detectCheatAndBan 中，kick 必须先于 close 广播到客户端。
-  // 若 acceptEnvelope(kick) 内部触发了 auto-close，这里标记后由 detectCheatAndBan 统一广播。
-  private _inCheatDetection = false;
-  private _autoCloseEnvelope: SignedEnvelope | null = null;
   private listingsCache: Map<string, RoomListing> | null = null;
   private usersCache: Map<string, UserRecord> | null = null;
   private bannedUsersCache: Set<string> | null = null;
@@ -387,41 +391,46 @@ export class DuelRoom extends DurableObject<Env> {
       ? applyEvent(this.cachedState.roomId === event.roomId ? this.cachedState : createInitialState(event.roomId), event)
       : applyEvents(event.roomId, this.eventsCache!.map((item) => item.event));
     this.writeSnapshot("events", this.eventsCache!);
-    // 作弊检测：比赛进行中，过快 AC（按题目难度）或同一人两次 AC 间隔过短，由 System 直接封禁。
+    // 通知中心：聊天 @ 提及、封禁/禁言/解除等系统事件异步写入全局通知（失败静默，不阻塞主流程）。
+    void this.pushEventNotifications(event);
+    // 作弊检测：比赛进行中，过快 AC（按题目难度）或同一人两次 AC 间隔过短，
+    // 由 System 终止比赛并自动提交举报工单（不再自动封禁）。
     // 用 previousPhase 而非当前 phase：若作弊 AC 同时是制胜 AC，applyEvent 内的 updateWinner
-    // 会先把 phase 翻成 finished，此时仍需检测并在下方 detectCheatAndBan 里覆盖胜利。
+    // 会先把 phase 翻成 finished，此时仍需检测并在下方 detectCheatAndReport 里覆盖胜利。
     if (event.type === "judge.recordSeen") {
       console.log(`[acceptEnvelope] judge.recordSeen: previousPhase=${previousPhase}, currentPhase=${this.cachedState.phase}, ` +
         `recordStatus=${event.record.status}, recordAt=${event.record.at}, ` +
         `stateStartedAt=${this.cachedState.startedAt}, willCallDetect=${event.roomId !== "global" && previousPhase === "arena"}`);
     }
     if (event.roomId !== "global" && event.type === "judge.recordSeen" && previousPhase === "arena") {
-      await this.detectCheatAndBan(event);
+      await this.detectCheatAndReport(event);
     }
-    // 记录比赛开始的服务器时间，供 detectCheatAndBan 跨时钟稳健地计算 elapsed。
+    // 记录比赛开始的服务器时间，供 detectCheatAndReport 跨时钟稳健地计算 elapsed。
     if (event.roomId !== "global" && event.type === "game.started" && this.cachedState.phase === "arena") {
       this.matchStartServerMs = Date.now();
     }
-    // 比赛进行中（arena）任意封禁 => 直接取消对决，由 directory 落地惩罚。
+    // 比赛进行中（arena）管理员手动封禁 => 直接取消对决（close reason 附带被封禁者姓名，
+    // 客户端与 directory 据此按"作弊取消"处理）。
     if (event.roomId !== "global" && event.type === "player.kicked" && this.cachedState.phase === "arena") {
+      const kickedName = kickedPlayer?.luoguName || event.targetName || "";
       const closeEnvelope = await systemCloseEnvelope(
         this.cachedState.roomId,
         this.cachedState.lamport + 1,
         Date.now(),
-        "检测到作弊，对决取消"
+        `检测到作弊，对决取消${CHEAT_CLOSE_SEPARATOR}${kickedName}`
       );
       const savedClose = await this.acceptEnvelope(closeEnvelope);
-      // 作弊检测流程中，kick 必须先于 close 广播。此处只暂存 close，由 detectCheatAndBan 在 kick 广播后统一发出。
-      if (savedClose && this._inCheatDetection) {
-        this._autoCloseEnvelope = closeEnvelope;
-      } else if (savedClose) {
-        this.broadcast({ type: "event", envelope: closeEnvelope });
-      }
+      if (savedClose) this.broadcast({ type: "event", envelope: closeEnvelope });
     }
     // 全局封禁/禁言同步：房间内管理员/房主的封禁与禁言，跨房间转发到 global 房间，
     // 使"封禁和禁言都是全局的"在实时状态上真正生效（仅转发实际封禁与管理员禁言）。
     if (event.roomId !== "global" && (event.type === "player.kicked" || event.type === "player.muted" || event.type === "player.unmuted" || event.type === "player.unkicked")) {
       await this.propagateGlobalModeration(event);
+    }
+    // 全局解封需回灌各进行中房间：房间级封禁（state.banned / kicked）与全局相互独立，
+    // 仅解除全局封禁不会清除比赛房间内残留的封禁，该房间重放记录时仍会再次自动封禁。
+    if (event.roomId === "global" && event.type === "player.unkicked") {
+      await this.propagateGlobalUnban(event);
     }
     if (claimName && !isPlayingSeat(this.cachedState.players[event.actorId]?.team)) {
       await this.releaseActivePlayer(claimName, event.roomId);
@@ -456,10 +465,10 @@ export class DuelRoom extends DurableObject<Env> {
     return true;
   }
 
-  private async detectCheatAndBan(event: Extract<DuelEvent, { type: "judge.recordSeen" }>): Promise<void> {
+  private async detectCheatAndReport(event: Extract<DuelEvent, { type: "judge.recordSeen" }>): Promise<void> {
     const record = event.record;
     if (record.status !== "OK" || event.cheatExempt) {
-      if (record.status !== "OK") console.log(`[detectCheatAndBan] skip: status=${record.status}, cheater=${record.luoguName}, pid=${record.pid}`);
+      if (record.status !== "OK") console.log(`[detectCheatAndReport] skip: status=${record.status}, cheater=${record.luoguName}, pid=${record.pid}`);
       return;
     }
     const state = this.cachedState;
@@ -467,19 +476,26 @@ export class DuelRoom extends DurableObject<Env> {
     const startedAt = this.matchStartServerMs ?? state.startedAt ?? 0;
     const player = Object.values(state.players).find((item) => normalizeName(item.luoguName) === normalizeName(record.luoguName));
     if (!player || !isTeam(player.team)) {
-      console.log(`[detectCheatAndBan] skip: player=${!!player}, team=${player?.team}, cheater=${record.luoguName}`);
+      console.log(`[detectCheatAndReport] skip: player=${!!player}, team=${player?.team}, cheater=${record.luoguName}`);
+      return;
+    }
+    // 已封禁者不再重复检测：手动解封后，若该玩家的 judge.recordSeen 被重放（重连 / 快照重建 /
+    // judgeProblem 重发），此处若继续检测会再次触发自动封禁，造成"解封后马上又被自动封禁"的死循环。
+    // 真正的新作弊（解封后另起一场并再次过快 AC）仍会被正常检测，因为那是一场全新的房间状态。
+    if (state.banned[normalizeName(record.luoguName)]) {
+      console.log(`[detectCheatAndReport] skip: already banned, cheater=${record.luoguName}`);
       return;
     }
     // 同一道题已记录过 OK（重复提交 / 双路径重复 claim），跳过重复检测，避免误封。
     if (state.feed.some((feed) => feed.pid === record.pid && normalizeName(feed.luoguName) === normalizeName(record.luoguName) && feed.status === "OK" && feed.at !== record.at)) {
-      console.log(`[detectCheatAndBan] skip duplicate claim: pid=${record.pid}, cheater=${record.luoguName}`);
+      console.log(`[detectCheatAndReport] skip duplicate claim: pid=${record.pid}, cheater=${record.luoguName}`);
       return;
     }
     const problem = state.problems.find((item) => item.pid.toLowerCase() === record.pid.toLowerCase());
     const minMs = minSolveMsForDifficulty(problem?.difficulty);
     const elapsed = record.at - startedAt;
     const tooFastFromStart = minMs > 0 && elapsed >= 0 && elapsed < minMs;
-    console.log(`[detectCheatAndBan] cheater=${record.luoguName}, pid=${record.pid}, difficulty=${problem?.difficulty}, ` +
+    console.log(`[detectCheatAndReport] cheater=${record.luoguName}, pid=${record.pid}, difficulty=${problem?.difficulty}, ` +
       `recordAt=${record.at}, startedAt=${startedAt}, matchStartServerMs=${this.matchStartServerMs}, ` +
       `elapsed=${elapsed}ms, minMs=${minMs}ms, tooFastFromStart=${tooFastFromStart}`);
     let lastOkAt: number | null = null;
@@ -493,37 +509,39 @@ export class DuelRoom extends DurableObject<Env> {
     // 同一玩家两次 AC 间隔过短（按题目难度最短时间映射，不再固定 60s）即判定作弊。
     const tooFastConsecutive = minMs > 0 && lastOkAt !== null && record.at - lastOkAt < minMs;
     if (!tooFastFromStart && !tooFastConsecutive) {
-      console.log(`[detectCheatAndBan] NOT triggered: tooFastFromStart=${tooFastFromStart}, tooFastConsecutive=${tooFastConsecutive}, ` +
+      console.log(`[detectCheatAndReport] NOT triggered: tooFastFromStart=${tooFastFromStart}, tooFastConsecutive=${tooFastConsecutive}, ` +
         `lastOkAt=${lastOkAt}, consecutiveGap=${lastOkAt !== null ? record.at - lastOkAt : "N/A"}`);
       return;
     }
-    console.log(`[detectCheatAndBan] CHEAT DETECTED: cheater=${record.luoguName}, will ban now`);
-    const reason = "自动检测——作弊";
-    const kickEnvelope = await systemKickEnvelope(
+    console.log(`[detectCheatAndReport] CHEAT DETECTED: cheater=${record.luoguName}, will terminate match + auto-report (no auto-ban)`);
+    const cheaterName = record.luoguName;
+    // 终止比赛：close reason 含"作弊"且附带作弊者姓名（供 directory 标记与客户端解析）。
+    const closeEnvelope = await systemCloseEnvelope(
       this.cachedState.roomId,
       this.cachedState.lamport + 1,
       Date.now(),
-      player.id,
-      player.luoguName,
-      reason
+      `检测到作弊，对决取消${CHEAT_CLOSE_SEPARATOR}${cheaterName}`
     );
-    this._inCheatDetection = true;
-    this._autoCloseEnvelope = null;
-    const savedKick = await this.acceptEnvelope(kickEnvelope);
-    this._inCheatDetection = false;
-    if (savedKick) this.broadcast({ type: "event", envelope: kickEnvelope });
-    if (this._autoCloseEnvelope) {
-      this.broadcast({ type: "event", envelope: this._autoCloseEnvelope });
-      this._autoCloseEnvelope = null;
-    } else if (!this.cachedState.closed) {
-      const closeEnvelope = await systemCloseEnvelope(
-        this.cachedState.roomId,
-        this.cachedState.lamport + 1,
-        Date.now(),
-        "检测到作弊，对决取消"
-      );
-      const savedClose = await this.acceptEnvelope(closeEnvelope);
-      if (savedClose) this.broadcast({ type: "event", envelope: closeEnvelope });
+    const savedClose = await this.acceptEnvelope(closeEnvelope);
+    if (savedClose) this.broadcast({ type: "event", envelope: closeEnvelope });
+    // 取消自动封禁逻辑：不再踢人 / 清零 Rating / 全局封禁 / +10 补偿。
+    // 改为自动发起工单，由管理员在工单中审查并决定是否封禁或清零。
+    void this.createCheatReportTicket(cheaterName, this.cachedState.roomId, this.roomSecret ?? "");
+  }
+
+  // 作弊自动检测后自动发起工单：举报用户 xxx 比赛疑似作弊（type=report），
+  // 作者 VDsystem，责任人 Gcend，状态 处理中，并自动 @ 用户。降级为尽力而为，不影响比赛终止。
+  private async createCheatReportTicket(cheaterName: string, roomId: string, secret: string): Promise<void> {
+    try {
+      const url = new URL("https://duel.internal/api/tickets/auto-report");
+      const response = await this.env.TICKET_STORE.getByName("__tickets").fetch(new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-vd-claim": INTERNAL_CLAIM },
+        body: JSON.stringify({ cheaterName, roomId, secret })
+      }));
+      if (!response.ok) console.log(`[createCheatReportTicket] ticket create returned ${response.status}`);
+    } catch (error) {
+      console.log(`[createCheatReportTicket] failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -630,6 +648,59 @@ export class DuelRoom extends DurableObject<Env> {
     return this.eventsCache!;
   }
 
+  // 把聊天 @提及 / 封禁 / 禁言等系统事件写入全局通知中心（TicketStore）。
+  // 事件已持久化后才调用，DO 重启时由 hydrateEvents 直接重建状态、不会重放本逻辑，因此不会产生重复通知。
+  private pushEventNotifications(event: DuelEvent): Promise<void> {
+    const roomId = event.roomId || "";
+    const link = `room=${encodeURIComponent(roomId)}&secret=${encodeURIComponent(this.roomSecret ?? "")}`;
+    const players = this.cachedState.players ?? {};
+    const actorName = players[event.actorId]?.luoguName ?? "有人";
+    const push = (recipient: string, text: string, kind = "status"): void => {
+      const name = normalizeName(recipient);
+      if (!name) return;
+      const body = JSON.stringify({ recipient: name, text, kind, link });
+      void this.env.TICKET_STORE.getByName("__tickets")
+        .fetch(new Request("https://duel.internal/api/system-notify", { method: "POST", headers: { "content-type": "application/json" }, body }))
+        .catch(() => undefined);
+    };
+    try {
+      if (event.type === "chat.sent") {
+        const mentions = Array.from(new Set(
+          [...event.text.matchAll(/@([^\s@，。、！？；：,.;:!?()（）\[\]【】<>《》"'「」“”·]+)/gu)].map((match) => normalizeName(match[1]))
+        )).filter((name) => name && name !== normalizeName(actorName));
+        for (const name of mentions) push(name, `${actorName} 在房间聊天中 @ 了你`, "mention");
+        return Promise.resolve();
+      }
+      if (event.type === "player.kicked") {
+        const target = event.targetName || players[event.targetId]?.luoguName || "";
+        if (target) push(target, event.system ? "你因违规已被系统封禁，如有异议请提交申诉工单" : `你已被${event.by || actorName}移出房间`);
+        return Promise.resolve();
+      }
+      if (event.type === "player.unkicked" && event.targetName) {
+        push(event.targetName, "你已被解除封禁");
+        return Promise.resolve();
+      }
+      if (event.type === "player.muted") {
+        const target = event.targetName || players[event.targetId]?.luoguName || "";
+        if (target) push(target, `你已被${actorName}禁言`);
+        return Promise.resolve();
+      }
+      if (event.type === "player.unmuted") {
+        const target = event.targetName || players[event.targetId]?.luoguName || "";
+        if (target) push(target, "你已被解除禁言");
+        return Promise.resolve();
+      }
+      if (event.type === "room.muted" || event.type === "room.unmuted") {
+        const text = event.type === "room.muted" ? "房间已被全员禁言" : "房间已解除全员禁言";
+        for (const player of Object.values(players)) {
+          if (player.luoguName && player.luoguName !== actorName && isPlayingSeat(player.team)) push(player.luoguName, text);
+        }
+        return Promise.resolve();
+      }
+    } catch { /* 通知失败不影响主流程 */ }
+    return Promise.resolve();
+  }
+
   private hydrateEvents(): void {
     if (this.eventsCache) return;
     const snapshot = this.readSnapshot<SignedEnvelope[]>("events");
@@ -699,7 +770,7 @@ export class DuelRoom extends DurableObject<Env> {
       await this.ctx.storage.setAlarm(Date.now() + DIRECTORY_PRUNE_INTERVAL_MS);
       // 边缘缓存 300s 即可：房间目录靠 WebSocket 实时推送，HTTP 仅作兜底/手动刷新，
       // 过长缓存（24h）会让“已结束/平局”的房间在列表里长时间停留在“进行中”。
-      return Response.json({ rooms: this.listRooms() }, { headers: cacheHeaders(60, 300) });
+      return Response.json({ rooms: this.listRooms() }, { headers: noStoreHeaders() });
     }
     if (request.method === "POST") {
       this.directoryObject = true;
@@ -776,7 +847,7 @@ export class DuelRoom extends DurableObject<Env> {
 
   private handleUsers(request: Request): Response {
     if (request.method !== "GET") return jsonError("method not allowed", 405);
-    return Response.json({ users: this.listUsers() }, { headers: cacheHeaders(60, 24 * 60 * 60) });
+    return Response.json({ users: this.listUsers() }, { headers: noStoreHeaders() });
   }
 
   // 规则考试通过状态：由 worker 持久化（按规范化洛谷用户名），避免用户更换设备后重新考试。
@@ -830,7 +901,7 @@ export class DuelRoom extends DurableObject<Env> {
     if (!name) return jsonError("missing name", 400);
     if (request.method === "GET") {
       const user = this.readUser(name);
-      return user ? Response.json({ user }, { headers: cacheHeaders(60, 24 * 60 * 60) }) : jsonError("not found", 404);
+      return user ? Response.json({ user }, { headers: noStoreHeaders() }) : jsonError("not found", 404);
     }
     if (request.method === "POST") {
       const body = (await request.json()) as Partial<UserRecord>;
@@ -1048,13 +1119,12 @@ export class DuelRoom extends DurableObject<Env> {
     this.hydrateProcessedResults();
     if (this.processedResultsCache!.has(listing.roomId)) return;
 
-    // 作弊封禁：作弊者 Rating 清零，其余参赛者每人 +10 Rating，并对作弊者执行全局封禁。
-    if (listing.cheatBanned && listing.cheaterName) {
-      this.applyCheatResult(listing);
+    // 作弊场仅记录已处理：不再自动清零 Rating / 全局封禁 / +10 补偿（已取消自动封禁逻辑）。
+    // 惩罚由管理员工单（举报用户xxx比赛疑似作弊）中的“封禁 / 清零 Rating”按钮执行。
+    if (listing.cheatBanned) {
       this.ctx.storage.sql.exec("INSERT INTO processed_results (room_id, processed_at) VALUES (?, ?)", listing.roomId, Date.now());
       this.processedResultsCache!.add(listing.roomId);
       this.writeSnapshot("processed-results", [...this.processedResultsCache!]);
-      await this.enforceGlobalCheatBan(listing.cheaterName);
       return;
     }
 
@@ -1079,34 +1149,23 @@ export class DuelRoom extends DurableObject<Env> {
     this.writeSnapshot("processed-results", [...this.processedResultsCache!]);
   }
 
-  private applyCheatResult(listing: RoomListing): void {
-    const cheaterName = (listing.cheaterName ?? "").trim();
-    if (!cheaterName) return;
-    const cheaterKey = normalizeName(cheaterName);
-    // 作弊者 Rating 重置为 0（必须在写入 banned_users 之前完成，writeUser 会拒绝已封禁用户）。
-    this.writeUser(applyCheatPenalty(this.upsertUser({ name: cheaterName })));
-    const others = dedupeNames([...(listing.redPlayers ?? []), ...(listing.bluePlayers ?? [])])
-      .filter((name) => normalizeName(name) !== cheaterKey);
-    for (const name of others) {
-      this.writeUser(applyCheatCompensation(this.upsertUser({ name })));
-    }
-  }
-
-  // 对作弊者发布全局（global 房间）系统封禁事件，使其返回主界面时持续看到封禁遮罩，
-  // 并阻止其再次创建/加入房间。rating 清零已在 applyCheatResult 中完成。
-  private async enforceGlobalCheatBan(cheaterName: string): Promise<void> {
+  // 把房间内的解封事件同步回各进行中比赛房间，清除其房间级 banned/kicked，
+  // 使手动解封真正生效（否则该房间重放记录会再次自动封禁）。尽力而为：个别房间不可用不影响全局解封落地。
+  private async propagateGlobalUnban(event: Extract<DuelEvent, { type: "player.unkicked" }>): Promise<void> {
     try {
-      const reason = "自动检测——作弊";
       const now = Date.now();
-      const envelope = await systemKickEnvelope("global", now, now, `name:${normalizeName(cheaterName)}`, cheaterName, reason);
-      const response = await this.env.DUEL_ROOM.getByName("global:public-lobby").fetch("https://duel.internal/event", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ envelope })
-      });
-      if (!response.ok) throw new Error(`global ban returned ${response.status}`);
+      for (const listing of this.listRooms()) {
+        if (listing.roomId === "global") continue;
+        const envelope = await systemUnkickEnvelope(listing.roomId, now, now, event.targetName);
+        const response = await this.env.DUEL_ROOM.getByName(`${listing.roomId}:${listing.secret}`).fetch("https://duel.internal/event", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ envelope })
+        });
+        if (!response.ok) throw new Error(`global unban propagate returned ${response.status}`);
+      }
     } catch {
-      // Rating 惩罚已落地；全局封禁失败仅影响主页遮罩，不影响本场清理。
+      // 房间级解封为尽力而为：个别房间不可用不影响全局解封已落地。
     }
   }
 
@@ -1373,6 +1432,481 @@ export class DuelRoom extends DurableObject<Env> {
   }
 }
 
+export class TicketStore extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS tickets (
+          id TEXT PRIMARY KEY,
+          project TEXT NOT NULL,
+          type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          description TEXT NOT NULL,
+          author TEXT NOT NULL,
+          author_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          assignee TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          closed_at INTEGER,
+          closed_reason TEXT,
+          reply_count INTEGER NOT NULL DEFAULT 0,
+          last_reply_at INTEGER
+        )
+      `);
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS comments (
+          id TEXT PRIMARY KEY,
+          ticket_id TEXT NOT NULL,
+          author TEXT NOT NULL,
+          author_id TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          mentions TEXT NOT NULL DEFAULT '[]'
+        )
+      `);
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS notifications (
+          id TEXT PRIMARY KEY,
+          recipient TEXT NOT NULL,
+          ticket_id TEXT NOT NULL,
+          ticket_title TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          text TEXT NOT NULL,
+          read INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          link TEXT
+        )
+      `);
+      // 存量库补列（新库建表时已包含 link，ALTER 会失败，静默忽略）。
+      try { this.ctx.storage.sql.exec(`ALTER TABLE notifications ADD COLUMN link TEXT`); } catch { /* 列已存在 */ }
+      this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS idx_comments_ticket ON comments(ticket_id, created_at)`);
+      this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS idx_notif_recipient ON notifications(recipient, created_at)`);
+      this.ctx.storage.sql.exec(`CREATE INDEX IF NOT EXISTS idx_tickets_updated ON tickets(updated_at)`);
+    });
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    try {
+      if (path === "/api/tickets" && request.method === "GET") return await this.listTickets(url);
+      if (path === "/api/tickets" && request.method === "POST") return await this.createTicket(request);
+      // auto-report 必须先于 /api/tickets/:id 匹配，否则 POST 会被通用路由判为 405。
+      if (path === "/api/tickets/auto-report" && request.method === "POST") return await this.createAutoReportTicket(request);
+      const contentMatch = path.match(/^\/api\/tickets\/([^/]+)\/content$/);
+      if (contentMatch) {
+        const id = decodeURIComponent(contentMatch[1]);
+        if (request.method === "PATCH") return await this.editTicketContent(request, id);
+        return jsonError("method not allowed", 405);
+      }
+      const ticketIdMatch = path.match(/^\/api\/tickets\/([^/]+)$/);
+      if (ticketIdMatch) {
+        const id = decodeURIComponent(ticketIdMatch[1]);
+        if (request.method === "GET") return await this.getTicket(id);
+        if (request.method === "PATCH") return await this.updateTicket(request, id);
+        if (request.method === "DELETE") return await this.deleteTicket(request, id);
+        return jsonError("method not allowed", 405);
+      }
+      const commentMatch = path.match(/^\/api\/tickets\/([^/]+)\/comments$/);
+      if (commentMatch && request.method === "POST") return await this.addComment(request, decodeURIComponent(commentMatch[1]));
+      if (path === "/api/notifications" && request.method === "GET") return await this.listNotifications(url);
+      if (path === "/api/notifications/read-all" && request.method === "POST") return await this.markAllRead(request);
+      if (path === "/api/system-notify" && request.method === "POST") return await this.systemNotify(request);
+      const notifMatch = path.match(/^\/api\/notifications\/([^/]+)\/read$/);
+      if (notifMatch && request.method === "POST") return await this.markRead(notifMatch[1]);
+      return jsonError("not found", 404);
+    } catch (error) {
+      return jsonError(error instanceof Error ? error.message : "ticket error", 500);
+    }
+  }
+
+  private query(sql: string, args: unknown[] = []): Array<Record<string, unknown>> {
+    const cursor = this.ctx.storage.sql.exec(sql, ...(args as Array<unknown>));
+    return cursor.toArray() as Array<Record<string, unknown>>;
+  }
+
+  private one(sql: string, args: unknown[] = []): Record<string, unknown> | null {
+    const rows = this.query(sql, args);
+    return rows[0] ?? null;
+  }
+
+  private ticketFromRow(row: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: row.id,
+      project: row.project,
+      type: row.type,
+      title: row.title,
+      description: row.description,
+      author: row.author,
+      authorId: row.author_id,
+      status: row.status,
+      assignee: row.assignee ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      closedAt: row.closed_at ?? null,
+      closedReason: row.closed_reason ?? null,
+      replyCount: row.reply_count,
+      lastReplyAt: row.last_reply_at ?? null
+    };
+  }
+
+  private commentFromRow(row: Record<string, unknown>): Record<string, unknown> {
+    let mentions: string[] = [];
+    try {
+      mentions = JSON.parse(String(row.mentions ?? "[]")) as string[];
+    } catch {
+      mentions = [];
+    }
+    return {
+      id: row.id,
+      ticketId: row.ticket_id,
+      author: row.author,
+      authorId: row.author_id,
+      body: row.body,
+      createdAt: row.created_at,
+      mentions
+    };
+  }
+
+  private notifFromRow(row: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: row.id,
+      recipient: row.recipient,
+      ticketId: row.ticket_id,
+      ticketTitle: row.ticket_title,
+      kind: row.kind,
+      text: row.text,
+      read: Number(row.read) === 1,
+      createdAt: row.created_at,
+      link: row.link ?? null
+    };
+  }
+
+  private insertNotification(recipient: string, ticketId: string, ticketTitle: string, kind: string, text: string, link: string | null = null): void {
+    if (!recipient) return;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO notifications (id, recipient, ticket_id, ticket_title, kind, text, read, created_at, link) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      crypto.randomUUID(),
+      recipient,
+      ticketId,
+      ticketTitle,
+      kind,
+      text,
+      Date.now(),
+      link
+    );
+  }
+
+  private async listTickets(url: URL): Promise<Response> {
+    const p = url.searchParams;
+    const clauses: string[] = [];
+    const args: unknown[] = [];
+    const project = p.get("project");
+    if (project) {
+      clauses.push("project = ?");
+      args.push(project);
+    }
+    const type = p.get("type");
+    if (type) {
+      clauses.push("type = ?");
+      args.push(type);
+    }
+    const status = p.get("status");
+    if (status) {
+      clauses.push("status = ?");
+      args.push(status);
+    }
+    const author = p.get("author");
+    if (author) {
+      clauses.push("author = ?");
+      args.push(author);
+    }
+    const assignee = p.get("assignee");
+    if (assignee) {
+      clauses.push("assignee = ?");
+      args.push(assignee);
+    }
+    const q = (p.get("q") || "").trim();
+    if (q) {
+      // 极宽松匹配：标题或描述包含子串即命中（哪怕只有一个相同字符）。
+      clauses.push("(title LIKE ? OR description LIKE ?)");
+      args.push(`%${q}%`, `%${q}%`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.query(`SELECT * FROM tickets ${where} ORDER BY COALESCE(last_reply_at, updated_at) DESC LIMIT 200`, args);
+    let tickets = rows.map((row) => this.ticketFromRow(row));
+    if (q) {
+      const term = q.toLowerCase();
+      tickets = tickets
+        .map((t) => {
+          const title = String(t.title || "").toLowerCase();
+          const desc = String(t.description || "").toLowerCase();
+          let score = 0;
+          if (title.includes(term)) score += 10;
+          score += (title.split(term).length - 1) * 3;
+          score += desc.split(term).length - 1;
+          return { t, score };
+        })
+        .sort((a, b) => b.score - a.score || (Number(b.t.updatedAt) - Number(a.t.updatedAt)))
+        .map((entry) => entry.t);
+    }
+    return Response.json({ tickets });
+  }
+
+  private async createTicket(request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return jsonError("invalid body", 400);
+    const project = String(body.project || "");
+    const type = String(body.type || "");
+    const title = String(body.title || "").trim();
+    const description = String(body.description || "");
+    const author = String(body.author || "").trim();
+    const authorId = String(body.authorId || "");
+    if (!["vjudge-duel", "gengen-rmj"].includes(project)) return jsonError("invalid project", 400);
+    if (!["appeal", "report", "suggestion", "bug"].includes(type)) return jsonError("invalid type", 400);
+    if (title.length < 5 || title.length > 100) return jsonError("标题长度需为 5-100 字符", 400);
+    if (!description.trim()) return jsonError("工单描述不能为空", 400);
+    if (description.length > 20000) return jsonError("描述过长", 400);
+    if (!author || !authorId) return jsonError("missing author", 400);
+    const now = Date.now();
+    const id = crypto.randomUUID();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO tickets (id, project, type, title, description, author, author_id, status, assignee, created_at, updated_at, reply_count) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, 0)`,
+      id,
+      project,
+      type,
+      title,
+      description,
+      author,
+      authorId,
+      now,
+      now
+    );
+    const row = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    return Response.json({ ticket: row ? this.ticketFromRow(row) : null }, { status: 201 });
+  }
+
+  // 内部系统调用：自动发起“举报用户”工单（作弊自动检测触发）。
+  // 仅接受带合法内部鉴权头的请求，避免外部伪造。
+  private async createAutoReportTicket(request: Request): Promise<Response> {
+    if (request.headers.get("x-vd-claim") !== INTERNAL_CLAIM) return jsonError("forbidden", 403);
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return jsonError("invalid body", 400);
+    const cheaterName = String(body.cheaterName || "").trim();
+    const roomId = String(body.roomId || "").trim();
+    const secret = String(body.secret || "").trim();
+    if (!cheaterName || !roomId) return jsonError("missing fields", 400);
+    const now = Date.now();
+    const id = crypto.randomUUID();
+    const title = `举报用户${cheaterName}比赛疑似作弊`;
+    const description = `用户${cheaterName}在https://duel.gengen.qzz.io/#room=${roomId}&secret=${secret} 提交记录异常，疑似有作弊嫌疑`;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO tickets (id, project, type, title, description, author, author_id, status, assignee, created_at, updated_at, reply_count) VALUES (?, 'vjudge-duel', 'report', ?, ?, ?, 'vdsystem', 'processing', ?, ?, ?, 0)`,
+      id, title, description, cheaterName, CHEAT_TICKET_AUTHOR, CHEAT_TICKET_ASSIGNEE, now, now
+    );
+    // 自动评论：VDsystem @ 用户，提醒其注意这条工单。
+    const commentId = crypto.randomUUID();
+    const commentBody = `@${cheaterName} 你可能在此比赛中作弊，请提供更详细的内容以方便我们的调查`;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO comments (id, ticket_id, author, author_id, body, created_at, mentions) VALUES (?, ?, ?, 'vdsystem', ?, ?, ?)`,
+      commentId, id, commentBody, now, JSON.stringify([normalizeName(cheaterName)])
+    );
+    this.ctx.storage.sql.exec(`UPDATE tickets SET reply_count = 1, last_reply_at = ?, updated_at = ? WHERE id = ?`, now, now, id);
+    this.insertNotification(normalizeName(cheaterName), id, title, "mention", `${CHEAT_TICKET_AUTHOR} 在工单《${title}》中 @ 了你`);
+    const row = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    return Response.json({ ticket: row ? this.ticketFromRow(row) : null }, { status: 201 });
+  }
+
+  private async getTicket(id: string): Promise<Response> {
+    const ticket = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    if (!ticket) return jsonError("ticket not found", 404);
+    const comments = this.query("SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC", [id]);
+    return Response.json({ ticket: this.ticketFromRow(ticket), comments: comments.map((row) => this.commentFromRow(row)) });
+  }
+
+  private async addComment(request: Request, ticketId: string): Promise<Response> {
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return jsonError("invalid body", 400);
+    const author = String(body.author || "").trim();
+    const authorId = String(body.authorId || "");
+    const commentBody = String(body.body || "");
+    if (!author || !authorId) return jsonError("missing author", 400);
+    if (!commentBody.trim()) return jsonError("评论内容不能为空", 400);
+    if (commentBody.length > 5000) return jsonError("评论过长", 400);
+    const ticket = this.one("SELECT * FROM tickets WHERE id = ?", [ticketId]);
+    if (!ticket) return jsonError("ticket not found", 404);
+    const ticketTitle = String(ticket.title);
+    const ticketAuthor = String(ticket.author);
+    const now = Date.now();
+    const commentId = crypto.randomUUID();
+    // 宽松匹配 @提及：支持中文/Unicode 用户名，遇到空白或常见标点即截止。
+    const mentionPattern = /@([^\s@，。、！？；：,.;:!?()（）\[\]【】<>《》"'「」“”·]+)/gu;
+    const mentions = Array.from(
+      new Set([...commentBody.matchAll(mentionPattern)].map((match) => normalizeName(match[1])))
+    ).filter((name) => name && name !== normalizeName(author));
+    this.ctx.storage.sql.exec(
+      `INSERT INTO comments (id, ticket_id, author, author_id, body, created_at, mentions) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      commentId,
+      ticketId,
+      author,
+      authorId,
+      commentBody,
+      now,
+      JSON.stringify(mentions)
+    );
+    this.ctx.storage.sql.exec(
+      `UPDATE tickets SET reply_count = reply_count + 1, last_reply_at = ?, updated_at = ? WHERE id = ?`,
+      now,
+      now,
+      ticketId
+    );
+    const notified = new Set<string>();
+    const authorNorm = normalizeName(author);
+    const ticketAuthorNorm = normalizeName(ticketAuthor);
+    for (const name of mentions) {
+      if (name === ticketAuthorNorm) continue;
+      if (notified.has(name)) continue;
+      notified.add(name);
+      this.insertNotification(name, ticketId, ticketTitle, "mention", `${author} 在工单《${ticketTitle}》中 @ 了你`);
+    }
+    if (authorNorm !== ticketAuthorNorm && !notified.has(ticketAuthorNorm)) {
+      this.insertNotification(ticketAuthorNorm, ticketId, ticketTitle, "reply", `${author} 回复了您的工单《${ticketTitle}》`);
+    }
+    const updatedTicket = this.one("SELECT * FROM tickets WHERE id = ?", [ticketId]);
+    const comments = this.query("SELECT * FROM comments WHERE ticket_id = ? ORDER BY created_at ASC", [ticketId]);
+    return Response.json({ ticket: updatedTicket ? this.ticketFromRow(updatedTicket) : null, comments: comments.map((row) => this.commentFromRow(row)) });
+  }
+
+  private async updateTicket(request: Request, id: string): Promise<Response> {
+    const actor = normalizeName(request.headers.get("x-admin-name") || "");
+    if (!adminNames.has(actor)) return jsonError("admin required", 403);
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return jsonError("invalid body", 400);
+    const ticket = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    if (!ticket) return jsonError("ticket not found", 404);
+    const prevStatus = String(ticket.status);
+    let status = prevStatus;
+    if (typeof body.status === "string" && body.status) {
+      if (!["open", "processing", "closed", "done"].includes(body.status)) return jsonError("invalid status", 400);
+      status = body.status;
+    }
+    let assignee: string | null = (ticket.assignee as string | null) ?? null;
+    if (body.assignee !== undefined) assignee = body.assignee ? String(body.assignee).trim() : null;
+    let closedAt = (ticket.closed_at as number | null) ?? null;
+    let closedReason = (ticket.closed_reason as string | null) ?? null;
+    if (status === "closed") {
+      closedAt = Date.now();
+      closedReason = typeof body.closedReason === "string" && body.closedReason.trim() ? body.closedReason.trim() : (closedReason || "管理员关单");
+    } else if (status !== "closed" && prevStatus === "closed") {
+      closedAt = null;
+      closedReason = null;
+    }
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `UPDATE tickets SET status = ?, assignee = ?, closed_at = ?, closed_reason = ?, updated_at = ? WHERE id = ?`,
+      status,
+      assignee,
+      closedAt,
+      closedReason,
+      now,
+      id
+    );
+    const ticketTitle = String(ticket.title);
+    const ticketAuthor = String(ticket.author);
+    if (status !== prevStatus) {
+      const label = status === "closed" ? "已经被关单" : status === "processing" ? "处理中" : status === "done" ? "已完成" : "已重新打开";
+      const text = status === "closed" ? `您提交的工单《${ticketTitle}》已经被关单` : `您提交的工单《${ticketTitle}》${label}`;
+      this.insertNotification(normalizeName(ticketAuthor), id, ticketTitle, "status", text);
+    }
+    if (body.assignee !== undefined && assignee && normalizeName(assignee) !== normalizeName(ticketAuthor)) {
+      this.insertNotification(normalizeName(assignee), id, ticketTitle, "assign", `您被指定为工单《${ticketTitle}》的责任人`);
+    }
+    const updated = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    return Response.json({ ticket: updated ? this.ticketFromRow(updated) : null });
+  }
+
+  // 工单创建者（或管理员）修改标题/描述。
+  private async editTicketContent(request: Request, id: string): Promise<Response> {
+    const actor = normalizeName(request.headers.get("x-actor-name") || "");
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return jsonError("invalid body", 400);
+    const ticket = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    if (!ticket) return jsonError("ticket not found", 404);
+    if (!adminNames.has(actor) && normalizeName(String(ticket.author)) !== actor) return jsonError("permission denied", 403);
+    let title = String(body.title ?? "").trim();
+    let description = String(body.description ?? "").trim();
+    if (body.title !== undefined) {
+      if (title.length < 5 || title.length > 100) return jsonError("标题长度需为 5-100 字符", 400);
+    } else {
+      title = String(ticket.title);
+    }
+    if (body.description !== undefined) {
+      if (!description) return jsonError("工单描述不能为空", 400);
+      if (description.length > 20000) return jsonError("描述过长", 400);
+    } else {
+      description = String(ticket.description);
+    }
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `UPDATE tickets SET title = ?, description = ?, updated_at = ? WHERE id = ?`,
+      title,
+      description,
+      now,
+      id
+    );
+    const row = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    return Response.json({ ticket: row ? this.ticketFromRow(row) : null });
+  }
+
+  private async deleteTicket(request: Request, id: string): Promise<Response> {
+    const actor = normalizeName(request.headers.get("x-admin-name") || "");
+    if (!adminNames.has(actor)) return jsonError("admin required", 403);
+    const ticket = this.one("SELECT * FROM tickets WHERE id = ?", [id]);
+    if (!ticket) return jsonError("ticket not found", 404);
+    this.ctx.storage.sql.exec("DELETE FROM comments WHERE ticket_id = ?", id);
+    this.ctx.storage.sql.exec("DELETE FROM notifications WHERE ticket_id = ?", id);
+    this.ctx.storage.sql.exec("DELETE FROM tickets WHERE id = ?", id);
+    return Response.json({ ok: true });
+  }
+
+  private async systemNotify(request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body) return jsonError("invalid body", 400);
+    const recipient = normalizeName(String(body.recipient || "").trim());
+    const text = String(body.text || "").trim();
+    const kind = ["mention", "status", "assign", "reply", "system"].includes(String(body.kind)) ? String(body.kind) : "status";
+    const link = String(body.link || "");
+    if (!recipient) return jsonError("missing recipient", 400);
+    if (!text) return jsonError("missing text", 400);
+    this.insertNotification(recipient, "", "", kind, text, link || null);
+    return Response.json({ ok: true });
+  }
+
+  private async listNotifications(url: URL): Promise<Response> {
+    const name = normalizeName(url.searchParams.get("name") || "");
+    if (!name) return jsonError("missing name", 400);
+    const rows = this.query("SELECT * FROM notifications WHERE recipient = ? ORDER BY created_at DESC LIMIT 100", [name]);
+    const unreadRow = this.one("SELECT COUNT(*) AS c FROM notifications WHERE recipient = ? AND read = 0", [name]);
+    const unread = Number(unreadRow?.c ?? 0);
+    return Response.json({ notifications: rows.map((row) => this.notifFromRow(row)), unread });
+  }
+
+  private async markAllRead(request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    const name = normalizeName(String(body?.name || ""));
+    if (!name) return jsonError("missing name", 400);
+    this.ctx.storage.sql.exec("UPDATE notifications SET read = 1 WHERE recipient = ?", name);
+    return Response.json({ ok: true });
+  }
+
+  private async markRead(id: string): Promise<Response> {
+    this.ctx.storage.sql.exec("UPDATE notifications SET read = 1 WHERE id = ?", id);
+    return Response.json({ ok: true });
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -1388,10 +1922,18 @@ export default {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }
       });
     }
+    if (url.pathname === "/api/admin-names") return Response.json({ names: Array.from(adminNames) });
     if (url.pathname === "/api/auth/vjudge/verify" && request.method === "POST") return verifyVJudgeLogin(request, env);
     const problemBankMatch = url.pathname.match(/^\/api\/problem-bank\/(luogu|codeforces|atcoder)$/);
     if (problemBankMatch && request.method === "GET") {
       return proxyProblemBank(request, problemBankMatch[1] as ProblemBankSource, ctx);
+    }
+    // Vditor 运行时静态资源（同源 /vditor/3.11.2/dist/*，主源 BootCDN，详见 proxyVditorAsset）。
+    // 路径带版本号：旧版本曾把 /vditor/dist/* 交给 SPA fallback（返回 index.html）且被边缘缓存，
+    // 换新路径避开被污染的缓存条目；wrangler.jsonc 已把 /vditor/* 加入 run_worker_first。
+    const vditorAssetMatch = url.pathname.match(/^\/vditor\/3\.11\.2\/dist\/([\w./-]+\.(?:js|mjs|css|png|svg|gif|jpe?g|webp|json|woff2?|ttf|eot|otf|map))$/);
+    if (vditorAssetMatch && request.method === "GET") {
+      return proxyVditorAsset(vditorAssetMatch[1]);
     }
     if (url.pathname === "/api/vjudge/status" && request.method === "GET") return fetchVJudgeStatus(url, request, env);
     if (url.pathname === "/api/room-limit/low" && request.method === "GET") {
@@ -1453,6 +1995,10 @@ export default {
       const internalAction = action === "clear" ? "clear-room" : action;
       const response = await stub.fetch(new Request(`https://duel.internal/${internalAction}?secret=${encodeURIComponent(secret)}`, request));
       return action === "manual-claim" ? manualClaimCors(response) : response;
+    }
+
+    if (url.pathname.startsWith("/api/tickets") || url.pathname.startsWith("/api/notifications")) {
+      return env.TICKET_STORE.getByName("__tickets").fetch(new Request(`https://duel.internal${url.pathname}${url.search}`, request));
     }
 
     const assetResponse = await env.ASSETS.fetch(request);
@@ -1531,6 +2077,45 @@ const proxyProblemBank = async (request: Request, source: ProblemBankSource, ctx
   }
 };
 
+// Vditor 运行时静态资源代理。
+// Vditor 内部硬编码请求 `${cdn}/dist/...`，而 BootCDN（cdnjs 镜像）上的 vditor 是扁平目录
+// （无 dist/ 前缀，如 .../vditor/3.11.2/js/i18n/zh_CN.js），无法直接作为 cdn 使用。
+// 因此在 Worker 上暴露同源路径 /vditor/3.11.2/dist/*（已加入 run_worker_first）：
+// 主源 BootCDN（去掉 dist 前缀），BootCDN 缺失的文件（emoji 图片等）回退 jsdelivr（npm dist 布局），
+// 全部经 Cloudflare 边缘缓存，客户端同源加载最快。
+// 注意：KaTeX 字体（woff/ttf）经由 katex.min.css 的相对路径也会走本代理，扩展名白名单需包含字体格式。
+const VDITOR_BOOTCDN_BASE = "https://cdn.bootcdn.net/ajax/libs/vditor/3.11.2";
+const VDITOR_FALLBACK_BASE = "https://cdn.jsdelivr.net/npm/vditor@3.11.2/dist";
+const vditorAssetCacheSeconds = 365 * 24 * 60 * 60;
+
+const proxyVditorAsset = async (assetPath: string): Promise<Response> => {
+  if (assetPath.includes("..")) return jsonError("invalid path", 400);
+  for (const base of [VDITOR_BOOTCDN_BASE, VDITOR_FALLBACK_BASE]) {
+    try {
+      const upstream = await fetch(`${base}/${assetPath}`, {
+        cf: {
+          cacheEverything: true,
+          cacheTtl: vditorAssetCacheSeconds,
+          cacheTtlByStatus: { "200-299": vditorAssetCacheSeconds, "404": 0, "500-599": 0 }
+        },
+        signal: AbortSignal.timeout(15_000)
+      });
+      if (!upstream.ok || !upstream.body) continue;
+      const headers = new Headers();
+      // BootCDN 对字体返回 application/octet-stream，部分浏览器会拒绝在 @font-face 中使用，
+      // 这里按扩展名显式覆盖正确的 MIME 类型。
+      const ext = assetPath.slice(assetPath.lastIndexOf(".") + 1).toLowerCase();
+      const fontTypes: Record<string, string> = { woff2: "font/woff2", woff: "font/woff", ttf: "font/ttf", otf: "font/otf", eot: "application/vnd.ms-fontobject" };
+      headers.set("content-type", fontTypes[ext] ?? upstream.headers.get("content-type") ?? "application/octet-stream");
+      headers.set("cache-control", `public, max-age=${vditorAssetCacheSeconds}, immutable`);
+      return new Response(upstream.body, { status: 200, headers });
+    } catch {
+      // 尝试下一个源
+    }
+  }
+  return jsonError("vditor asset not found", 404);
+};
+
 const fetchVJudgeStatus = async (requestUrl: URL, request: Request, env: Env): Promise<Response> => {
   const oj = requestUrl.searchParams.get("oj") || "";
   const problem = (requestUrl.searchParams.get("problem") || "").trim();
@@ -1605,25 +2190,19 @@ const fetchVJudgeStatus = async (requestUrl: URL, request: Request, env: Env): P
 
 const directoryJsonResponse = async (request: Request, env: Env, internalUrl: string): Promise<Response> => {
   try {
-    const publicUrl = new URL(request.url);
-    publicUrl.search = "";
-    const cacheKey = new Request(publicUrl.toString(), { method: "GET" });
-    const cache = (caches as CacheStorage & { default: Cache }).default;
-    const cached = await cache.match(cacheKey);
-    if (cached) return cached;
-
     const response = await env.DUEL_ROOM.getByName("__directory").fetch(internalUrl);
     if (!response.ok) return jsonError(`directory returned ${response.status}`, response.status);
     const payload = await response.json();
     const body = JSON.stringify(payload);
+    // 不缓存：房间目录/用户列表是高频变化数据（比赛结束、评分更新），
+    // 之前的 20s Cache-API 缓存 + s-maxage=20 会让排行榜/大厅显示陈旧数据。
     const complete = new Response(body, {
       headers: {
         "content-type": "application/json; charset=utf-8",
         "content-length": String(new TextEncoder().encode(body).byteLength),
-        "cache-control": "public, max-age=20, s-maxage=20, stale-while-revalidate=20"
+        "cache-control": "no-store"
       }
     });
-    await cache.put(cacheKey, complete.clone());
     return complete;
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "directory response incomplete", 502);
@@ -1733,7 +2312,7 @@ const isPlaceholderName = (name: string): boolean => {
 };
 
 const protectApiRequest = async (request: Request, url: URL, env: Env): Promise<Response | null> => {
-  if (!new Set(["GET", "POST", "DELETE"]).has(request.method)) return jsonError("method not allowed", 405);
+  if (!new Set(["GET", "POST", "PATCH", "DELETE"]).has(request.method)) return jsonError("method not allowed", 405);
   const contentLength = Number(request.headers.get("content-length") || 0);
   if (Number.isFinite(contentLength) && contentLength > 256 * 1024) return jsonError("request body too large", 413);
   if (request.method !== "GET") {
@@ -1804,25 +2383,11 @@ const applyRatingDelta = (user: UserRecord, delta: number, won: boolean): UserRe
   updatedAt: Date.now()
 });
 
-// 作弊惩罚：Rating 直接清零（不改动胜负场次，比赛已取消）。
-const applyCheatPenalty = (user: UserRecord): UserRecord => ({
-  ...user,
-  rating: 0,
-  ratingHistory: [...(user.ratingHistory?.length ? user.ratingHistory : [{ at: user.updatedAt, rating: user.rating }]), { at: Date.now(), rating: 0 }].slice(-100),
-  updatedAt: Date.now()
-});
+// 作弊惩罚已取消：不再在后端自动清零 Rating 或补偿 +10（由管理员工单按钮决定惩罚）。
 
-// 作弊补偿：其余参赛者每人 +10 Rating（不计入胜负场次）。
-const applyCheatCompensation = (user: UserRecord): UserRecord => ({
-  ...user,
-  rating: user.rating + 10,
-  ratingHistory: [...(user.ratingHistory?.length ? user.ratingHistory : [{ at: user.updatedAt, rating: user.rating }]), { at: Date.now(), rating: user.rating + 10 }].slice(-100),
-  updatedAt: Date.now()
-});
-
-// 从事件流推导作弊者名称：room.closed 原因含"作弊"，取其之前最后一条踢人事件的 targetName。
-// 注意：既包含 system 作弊自动封禁（detectCheatAndBan 产生），也包含对决进行中管理员手动封禁
-// （player.kicked，system 为 false）——两者都应触发自动封禁系统（Rating 清零 + 全局封禁 + 其余 +10）。
+// 从事件流推导作弊者名称：room.closed 原因含"作弊"。
+// - 自动检测路径：不再踢人，作弊者姓名写在 close reason 分隔符之后。
+// - 管理员手动封禁路径：保留踢人事件，取最后一条踢人事件的 targetName。
 const deriveCheatBannedName = (envelopes: SignedEnvelope[]): string | null => {
   const closeEvent = envelopes.find((item) => item.event.type === "room.closed" && (item.event.reason ?? "").includes("作弊"))?.event as Extract<DuelEvent, { type: "room.closed" }> | undefined;
   if (!closeEvent) return null;
@@ -1833,15 +2398,20 @@ const deriveCheatBannedName = (envelopes: SignedEnvelope[]): string | null => {
       cheater = event.targetName ?? cheater;
     }
   }
+  if (!cheater) {
+    const sep = (closeEvent.reason ?? "").split(CHEAT_CLOSE_SEPARATOR);
+    if (sep.length > 1) cheater = sep[1].trim() || null;
+  }
   return cheater;
 };
 
 const compareEnvelopes = (a: SignedEnvelope, b: SignedEnvelope): number =>
   a.event.lamport - b.event.lamport || a.event.issuedAt - b.event.issuedAt || a.event.id.localeCompare(b.event.id);
 
-const cacheHeaders = (_browserMaxAge: number, edgeMaxAge = _browserMaxAge): HeadersInit => ({
-  "cache-control": `public, max-age=0, must-revalidate, s-maxage=${edgeMaxAge}, stale-while-revalidate=${edgeMaxAge * 4}`
-});
+// 高频变化的动态数据（用户评分/房间目录）禁止任何缓存（浏览器 + CDN）：
+// 之前 /api/users 与 /api/users/:name 带 s-maxage=86400，打完比赛评分更新后，
+// 排行榜/个人页仍被 CDN 缓存 24 小时、显示旧 rating。
+const noStoreHeaders = (): HeadersInit => ({ "cache-control": "no-store" });
 
 const isPlayingSeat = (seat: unknown): boolean => seat === "red" || seat === "blue";
 const systemStartEnvelope = async (roomId: string, lamport: number, issuedAt: number): Promise<SignedEnvelope> => {

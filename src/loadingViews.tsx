@@ -128,3 +128,26 @@ export const AdminSkeleton = () => (
     </section>
   </main>
 );
+
+// 工单页骨架：与 TicketsPage 布局一致（页头 + 筛选条 + 工单列表）。
+export const TicketsSkeleton = () => (
+  <main class="tickets-page tickets-skeleton" aria-hidden="true">
+    <header class="tickets-head">
+      <div><b class="skeleton-shape sk-title" /><span class="skeleton-shape sk-sub" /></div>
+      <i class="skeleton-shape sk-btn" />
+    </header>
+    <section class="panel tickets-panel">
+      <div class="tickets-filters">
+        <i class="skeleton-shape sk-filter" /><i class="skeleton-shape sk-filter" /><i class="skeleton-shape sk-filter" /><i class="skeleton-shape sk-search" />
+      </div>
+      <div class="ticket-list">
+        {Array.from({ length: 6 }, (_, index) => (
+          <div class="ticket-row skeleton-item" key={index}>
+            <div class="ticket-row-main"><i class="skeleton-shape sk-tag" /><i class="skeleton-shape sk-tag" /><b class="skeleton-shape sk-title" /></div>
+            <div class="ticket-row-meta"><i class="skeleton-shape sk-line" /><i class="skeleton-shape sk-line" /><i class="skeleton-shape sk-line" /></div>
+          </div>
+        ))}
+      </div>
+    </section>
+  </main>
+);
