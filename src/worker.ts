@@ -62,6 +62,8 @@ const CHEAT_CLOSE_SEPARATOR = "｜";
 // 自动举报工单的固定作者 / 责任人 / 状态。
 const CHEAT_TICKET_AUTHOR = "VDsystem";
 const CHEAT_TICKET_ASSIGNEE = "Gcend";
+// 作弊场作废后，给非作弊参赛者的 Rating 补偿。
+const CHEAT_COMPENSATION_RATING = 10;
 
 export class DuelRoom extends DurableObject<Env> {
   private eventsCache: SignedEnvelope[] | null = null;
@@ -173,6 +175,11 @@ export class DuelRoom extends DurableObject<Env> {
     if (url.pathname.endsWith("/snapshot")) {
       await this.expireStaleLobby();
       return Response.json({ envelopes: this.listEvents() });
+    }
+    // 内部使用：返回该房间的当前 lamport，供其他 DO 生成系统信封时取 lamport+1。
+    if (url.pathname.endsWith("/lamport")) {
+      this.hydrateEvents();
+      return Response.json({ lamport: this.cachedState.lamport }, { headers: noStoreHeaders() });
     }
     if (url.pathname.endsWith("/manual-claim") && request.method === "POST") {
       return this.handleManualClaim(request);
@@ -1119,9 +1126,12 @@ export class DuelRoom extends DurableObject<Env> {
     this.hydrateProcessedResults();
     if (this.processedResultsCache!.has(listing.roomId)) return;
 
-    // 作弊场仅记录已处理：不再自动清零 Rating / 全局封禁 / +10 补偿（已取消自动封禁逻辑）。
-    // 惩罚由管理员工单（举报用户xxx比赛疑似作弊）中的“封禁 / 清零 Rating”按钮执行。
+    // 作弊场：
+    // - 作弊者保持原样（不封禁、不清零、不扣 rating），等待管理员在自动工单里裁定；
+    // - 其余参赛者每人 +10 Rating 作为本场被作废的补偿（不计入胜负场次）；
+    // - 跳过正常 ELO 结算（该场没有胜负结果）。
     if (listing.cheatBanned) {
+      this.applyCheatCompensation(listing);
       this.ctx.storage.sql.exec("INSERT INTO processed_results (room_id, processed_at) VALUES (?, ?)", listing.roomId, Date.now());
       this.processedResultsCache!.add(listing.roomId);
       this.writeSnapshot("processed-results", [...this.processedResultsCache!]);
@@ -1149,6 +1159,31 @@ export class DuelRoom extends DurableObject<Env> {
     this.writeSnapshot("processed-results", [...this.processedResultsCache!]);
   }
 
+  // 作弊场补偿：除作弊者外的所有参赛者每人 +10 Rating，不计入胜负场次。
+  private applyCheatCompensation(listing: RoomListing): void {
+    const cheaterKey = normalizeName((listing.cheaterName ?? "").trim());
+    const others = dedupeNames([...(listing.redPlayers ?? []), ...(listing.bluePlayers ?? [])])
+      .filter((name) => normalizeName(name) !== cheaterKey);
+    for (const name of others) {
+      this.writeUser(applyCompensationDelta(this.upsertUser({ name }), CHEAT_COMPENSATION_RATING));
+    }
+  }
+
+  // 取目标房间的当前 lamport +1，用于系统生成的 moderation 信封。
+  // 此前这些信封直接用 Date.now() 当 lamport（约 1.7e12），与真实事件 lamport 序列脱节：
+  // 管理员若从过期快照发出解封事件（lamport 偏小），重放事件流时解封会排在封禁之前，
+  // 最终表现为"手动解封过一段时间又被自动封禁"。
+  private async nextLamport(objectName: string): Promise<number> {
+    try {
+      const response = await this.env.DUEL_ROOM.getByName(objectName).fetch("https://duel.internal/lamport");
+      if (!response.ok) return Date.now();
+      const data = (await response.json()) as { lamport?: number };
+      return typeof data.lamport === "number" && Number.isFinite(data.lamport) ? data.lamport + 1 : Date.now();
+    } catch {
+      return Date.now();
+    }
+  }
+
   // 把房间内的解封事件同步回各进行中比赛房间，清除其房间级 banned/kicked，
   // 使手动解封真正生效（否则该房间重放记录会再次自动封禁）。尽力而为：个别房间不可用不影响全局解封落地。
   private async propagateGlobalUnban(event: Extract<DuelEvent, { type: "player.unkicked" }>): Promise<void> {
@@ -1156,7 +1191,8 @@ export class DuelRoom extends DurableObject<Env> {
       const now = Date.now();
       for (const listing of this.listRooms()) {
         if (listing.roomId === "global") continue;
-        const envelope = await systemUnkickEnvelope(listing.roomId, now, now, event.targetName);
+        const objectName = `${listing.roomId}:${listing.secret}`;
+        const envelope = await systemUnkickEnvelope(listing.roomId, await this.nextLamport(objectName), now, event.targetName);
         const response = await this.env.DUEL_ROOM.getByName(`${listing.roomId}:${listing.secret}`).fetch("https://duel.internal/event", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1188,20 +1224,20 @@ export class DuelRoom extends DurableObject<Env> {
       };
       if (event.type === "player.kicked") {
         if (!this.cachedState.banned[normalizeName(event.targetName || "")]) return;
-        await postToGlobal(await systemKickEnvelope("global", now, now, `name:${normalizeName(event.targetName || "")}`, event.targetName || "", event.reason || "管理员封禁"));
+        await postToGlobal(await systemKickEnvelope("global", await this.nextLamport(globalName), now, `name:${normalizeName(event.targetName || "")}`, event.targetName || "", event.reason || "管理员封禁"));
         return;
       }
       if (event.type === "player.unkicked") {
-        await postToGlobal(await systemUnkickEnvelope("global", now, now, event.targetName));
+        await postToGlobal(await systemUnkickEnvelope("global", await this.nextLamport(globalName), now, event.targetName));
         return;
       }
       // 禁言/解禁言：仅管理员操作全局化（房主房间内禁言保持房间级）。
       const actorName = this.cachedState.players[event.actorId]?.luoguName ?? "";
       if (!isAdminName(normalizeName(actorName))) return;
       if (event.type === "player.muted") {
-        await postToGlobal(await systemMuteEnvelope("global", now, now, `name:${normalizeName(event.targetName || "")}`, event.targetName || ""));
+        await postToGlobal(await systemMuteEnvelope("global", await this.nextLamport(globalName), now, `name:${normalizeName(event.targetName || "")}`, event.targetName || ""));
       } else if (event.type === "player.unmuted") {
-        await postToGlobal(await systemUnmuteEnvelope("global", now, now, `name:${normalizeName(event.targetName || "")}`, event.targetName || ""));
+        await postToGlobal(await systemUnmuteEnvelope("global", await this.nextLamport(globalName), now, `name:${normalizeName(event.targetName || "")}`, event.targetName || ""));
       }
     } catch {
       // 全局同步失败不影响本房间事件落地。
@@ -1704,14 +1740,14 @@ export class TicketStore extends DurableObject<Env> {
     const description = `用户${cheaterName}在https://duel.gengen.qzz.io/#room=${roomId}&secret=${secret} 提交记录异常，疑似有作弊嫌疑`;
     this.ctx.storage.sql.exec(
       `INSERT INTO tickets (id, project, type, title, description, author, author_id, status, assignee, created_at, updated_at, reply_count) VALUES (?, 'vjudge-duel', 'report', ?, ?, ?, 'vdsystem', 'processing', ?, ?, ?, 0)`,
-      id, title, description, cheaterName, CHEAT_TICKET_AUTHOR, CHEAT_TICKET_ASSIGNEE, now, now
+      id, title, description, CHEAT_TICKET_AUTHOR, CHEAT_TICKET_ASSIGNEE, now, now
     );
     // 自动评论：VDsystem @ 用户，提醒其注意这条工单。
     const commentId = crypto.randomUUID();
     const commentBody = `@${cheaterName} 你可能在此比赛中作弊，请提供更详细的内容以方便我们的调查`;
     this.ctx.storage.sql.exec(
       `INSERT INTO comments (id, ticket_id, author, author_id, body, created_at, mentions) VALUES (?, ?, ?, 'vdsystem', ?, ?, ?)`,
-      commentId, id, commentBody, now, JSON.stringify([normalizeName(cheaterName)])
+      commentId, id, CHEAT_TICKET_AUTHOR, commentBody, now, JSON.stringify([normalizeName(cheaterName)])
     );
     this.ctx.storage.sql.exec(`UPDATE tickets SET reply_count = 1, last_reply_at = ?, updated_at = ? WHERE id = ?`, now, now, id);
     this.insertNotification(normalizeName(cheaterName), id, title, "mention", `${CHEAT_TICKET_AUTHOR} 在工单《${title}》中 @ 了你`);
@@ -2383,7 +2419,13 @@ const applyRatingDelta = (user: UserRecord, delta: number, won: boolean): UserRe
   updatedAt: Date.now()
 });
 
-// 作弊惩罚已取消：不再在后端自动清零 Rating 或补偿 +10（由管理员工单按钮决定惩罚）。
+// 作弊场补偿：非作弊参赛者每人 +10 Rating，不计入胜负场次（本场没有胜负结果）。
+const applyCompensationDelta = (user: UserRecord, delta: number): UserRecord => ({
+  ...user,
+  rating: Math.max(0, user.rating + delta),
+  ratingHistory: [...(user.ratingHistory?.length ? user.ratingHistory : [{ at: user.updatedAt, rating: user.rating }]), { at: Date.now(), rating: Math.max(0, user.rating + delta) }].slice(-100),
+  updatedAt: Date.now()
+});
 
 // 从事件流推导作弊者名称：room.closed 原因含"作弊"。
 // - 自动检测路径：不再踢人，作弊者姓名写在 close reason 分隔符之后。

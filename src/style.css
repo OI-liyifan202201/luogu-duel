@@ -185,7 +185,11 @@ button:hover:not(:disabled) {
   box-shadow: 0 7px 18px color-mix(in srgb, var(--green) 12%, transparent);
 }
 
-button:active:not(:disabled) { transform: translateY(0) scale(.97); }
+/* 按压反馈即时生效：active 状态用更短的过渡，避免"点了没反应"的迟滞感。 */
+button:active:not(:disabled) {
+  transform: translateY(0) scale(.97);
+  transition-duration: 50ms;
+}
 
 button.danger:hover:not(:disabled) {
   border-color: var(--red);
@@ -1038,7 +1042,7 @@ body .duel-swal-deny {
   border-radius: var(--panel-radius);
   background: color-mix(in srgb, var(--panel) 94%, transparent);
   box-shadow: var(--shadow);
-  animation: card-in 420ms cubic-bezier(.16, 1, .3, 1) both;
+  animation: card-in 300ms cubic-bezier(.16, 1, .3, 1) backwards;
   transition:
     border-color 160ms ease,
     transform 160ms ease,
@@ -1115,7 +1119,7 @@ body .duel-swal-deny {
   background: color-mix(in srgb, var(--panel) 96%, transparent);
   box-shadow: 0 14px 38px rgb(0 0 0 / .24);
   transform: translateX(-50%);
-  transition: width 280ms ease 280ms, border-radius 280ms ease 280ms, box-shadow 180ms ease 280ms;
+  transition: width 260ms cubic-bezier(.16, 1, .3, 1), border-radius 260ms cubic-bezier(.16, 1, .3, 1), box-shadow 180ms ease;
 }
 
 .match-island-summary {
@@ -1147,7 +1151,7 @@ body .duel-swal-deny {
 .match-island:hover,
 .match-island.pinned { width: min(680px, calc(100% - 28px)); border-radius: 10px; box-shadow: 0 20px 48px rgb(0 0 0 / .3); transition: width 280ms ease, border-radius 280ms ease, box-shadow 180ms ease; }
 .match-island:hover .island-hover-detail,
-.match-island.pinned .island-hover-detail { max-height: 38px; padding: 0 12px 9px; opacity: 1; transition: max-height 180ms ease 280ms, padding 180ms ease 280ms, opacity 180ms ease 280ms; }
+.match-island.pinned .island-hover-detail { max-height: 38px; padding: 0 12px 9px; opacity: 1; transition: max-height 180ms ease 120ms, padding 180ms ease 120ms, opacity 180ms ease 120ms; }
 .island-roster {
   max-height: 0;
   opacity: 0;
@@ -1168,7 +1172,7 @@ body .duel-swal-deny {
   opacity: 1;
   padding: 10px;
   border-top-width: 1px;
-  transition: max-height 280ms cubic-bezier(.16, 1, .3, 1) 280ms, opacity 200ms ease 280ms, padding 280ms cubic-bezier(.16, 1, .3, 1) 280ms, border-width 280ms ease 280ms;
+  transition: max-height 280ms cubic-bezier(.16, 1, .3, 1) 160ms, opacity 200ms ease 160ms, padding 280ms cubic-bezier(.16, 1, .3, 1) 160ms, border-width 280ms ease 160ms;
 }
 .match-island:hover .island-roster .teams,
 .match-island.pinned .island-roster .teams { max-height: min(58vh, 470px); overflow: auto; }
@@ -2176,6 +2180,8 @@ img.chat-avatar {
 
 .problem-grid {
   overflow: auto;
+  /* 题目较少时不让卡片行均分撑满面板：直接从顶部排列，下方留白。 */
+  align-content: start;
 }
 
 .problem-card {
@@ -2229,6 +2235,14 @@ img.chat-avatar {
   border-color: color-mix(in srgb, var(--difficulty-color) 55%, var(--line));
   color: var(--difficulty-color);
   font-weight: 900;
+  border-radius: 999px;
+  padding: 2px 8px;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.problem-card:hover .difficulty-badge {
+  transform: translateY(-1px);
+  border-color: var(--difficulty-color);
 }
 
 :root[data-theme="dark"] .difficulty-badge[data-difficulty="8"] {
@@ -3109,13 +3123,11 @@ body .cheat-swal-confirm.duel-swal-confirm:hover {
 @keyframes card-in {
   from {
     opacity: 0;
-    filter: saturate(.72);
     transform: translateY(16px) scale(.992);
   }
 
   to {
     opacity: 1;
-    filter: saturate(1);
     transform: translateY(0) scale(1);
   }
 }
@@ -3133,9 +3145,67 @@ html.boot-instant .achievement,
 html.boot-instant .profile-section,
 html.boot-instant .profile-card,
 html.boot-instant .profile-tab-panel,
-html.boot-instant .wizard-step {
+html.boot-instant .profile-avatar,
+html.boot-instant .profile-identity > *,
+html.boot-instant .profile-rating-summary,
+html.boot-instant .profile-rating-summary strong,
+html.boot-instant .profile-sidebar > *,
+html.boot-instant .profile-stats strong,
+html.boot-instant .match-rows .match-row,
+html.boot-instant .wizard-step,
+html.boot-instant .view-transition {
   animation: none !important;
 }
+
+/* ===== 页面切换过渡：key 变化（home/room/profile/admin/tickets/exam、换房）时重挂载触发 ===== */
+.view-transition {
+  animation: view-enter 320ms cubic-bezier(.16, 1, .3, 1) backwards;
+}
+
+@keyframes view-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(.996);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ===== 列表交错入场：房间卡 / 对局行 / 排行行 / 题目卡依次浮现 ===== */
+.duel-row,
+.ranking-row,
+.room-card,
+.problem-card {
+  animation: card-in 260ms cubic-bezier(.16, 1, .3, 1) backwards;
+}
+
+.duel-row:nth-child(2),
+.ranking-row:nth-child(2),
+.room-card:nth-child(2),
+.problem-card:nth-child(2) { animation-delay: 30ms; }
+
+.duel-row:nth-child(3),
+.ranking-row:nth-child(3),
+.room-card:nth-child(3),
+.problem-card:nth-child(3) { animation-delay: 60ms; }
+
+.duel-row:nth-child(4),
+.ranking-row:nth-child(4),
+.room-card:nth-child(4),
+.problem-card:nth-child(4) { animation-delay: 90ms; }
+
+.duel-row:nth-child(5),
+.ranking-row:nth-child(5),
+.room-card:nth-child(5),
+.problem-card:nth-child(5) { animation-delay: 120ms; }
+
+.duel-row:nth-child(n + 6),
+.ranking-row:nth-child(n + 6),
+.room-card:nth-child(n + 6),
+.problem-card:nth-child(n + 6) { animation-delay: 150ms; }
 
 @keyframes line-in {
   from {
@@ -4828,3 +4898,116 @@ select option {
   width: 72px;
   height: 11px;
 }
+
+/* ===== /user/ 个人主页动画：头像 / 身份 / 评分 / 标签页 / 对局行 / 成就 ===== */
+@keyframes profile-avatar-in {
+  from { opacity: 0; transform: scale(.82) translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes profile-fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes profile-num-in {
+  0% { opacity: 0; transform: scale(.86); }
+  62% { opacity: 1; transform: scale(1.05); }
+  100% { opacity: 1; transform: none; }
+}
+
+@keyframes profile-row-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes profile-bar-fill {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes achv-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--gold) 34%, transparent); }
+  50% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--gold) 0%, transparent); }
+}
+
+/* 头像：入场弹出 + 悬停微旋转放大 + 光环 */
+.profile-avatar {
+  animation: profile-avatar-in 620ms cubic-bezier(.16, 1, .3, 1) backwards;
+  transition: transform .5s cubic-bezier(.16, 1, .3, 1), box-shadow .45s ease, border-color .3s ease;
+}
+
+.profile-avatar:hover {
+  transform: scale(1.05) rotate(-1.5deg);
+  border-color: color-mix(in srgb, var(--green) 55%, var(--line));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 12%, transparent), 0 14px 30px rgba(0, 0, 0, .28);
+}
+
+/* 身份信息：昵称 / 战绩依次浮现 */
+.profile-identity > * {
+  animation: profile-fade-up 520ms cubic-bezier(.16, 1, .3, 1) backwards;
+}
+.profile-identity > *:nth-child(1) { animation-delay: 90ms; }
+.profile-identity > *:nth-child(2) { animation-delay: 150ms; }
+.profile-identity > *:nth-child(3) { animation-delay: 210ms; }
+
+/* 评分：整块淡入 + 数字弹性放大 */
+.profile-rating-summary { animation: profile-fade-up 520ms cubic-bezier(.16, 1, .3, 1) 260ms backwards; }
+.profile-rating-summary strong { animation: profile-num-in 700ms cubic-bezier(.16, 1, .3, 1) 340ms backwards; }
+
+/* 标签页：入场 + 悬停/激活反馈 */
+.profile-tabs { animation: profile-fade-up 460ms cubic-bezier(.16, 1, .3, 1) 300ms backwards; }
+.profile-tabs button {
+  transition: color .28s cubic-bezier(.16, 1, .3, 1), border-color .28s cubic-bezier(.16, 1, .3, 1),
+    background .28s cubic-bezier(.16, 1, .3, 1), transform .28s cubic-bezier(.16, 1, .3, 1);
+}
+.profile-tabs button:hover {
+  color: var(--text);
+  transform: translateY(-2px);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+.profile-tabs button:active { transform: translateY(0) scale(.98); }
+.profile-tabs button.active { animation: profile-fade-up 340ms cubic-bezier(.16, 1, .3, 1) backwards; }
+
+/* 侧栏（Rating 曲线 / 比赛数据）交错入场 */
+.profile-sidebar > * { animation: profile-fade-up 480ms cubic-bezier(.16, 1, .3, 1) backwards; }
+.profile-sidebar > *:nth-child(1) { animation-delay: 120ms; }
+.profile-sidebar > *:nth-child(2) { animation-delay: 200ms; }
+.profile-stats strong { animation: profile-num-in 620ms cubic-bezier(.16, 1, .3, 1) 300ms backwards; }
+
+/* 对局行：逐行浮现 + 悬停抬起 */
+.match-rows .match-row {
+  animation: profile-row-in 420ms cubic-bezier(.16, 1, .3, 1) backwards;
+  transition: transform .3s cubic-bezier(.16, 1, .3, 1), border-color .25s ease, background .25s ease;
+}
+.match-rows .match-row:nth-child(1) { animation-delay: 40ms; }
+.match-rows .match-row:nth-child(2) { animation-delay: 80ms; }
+.match-rows .match-row:nth-child(3) { animation-delay: 120ms; }
+.match-rows .match-row:nth-child(4) { animation-delay: 160ms; }
+.match-rows .match-row:nth-child(5) { animation-delay: 200ms; }
+.match-rows .match-row:nth-child(6) { animation-delay: 240ms; }
+.match-rows .match-row:nth-child(7) { animation-delay: 280ms; }
+.match-rows .match-row:nth-child(n + 8) { animation-delay: 320ms; }
+.match-rows .match-row:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--green) 42%, var(--line-soft));
+  background: color-mix(in srgb, var(--green) 6%, transparent);
+}
+
+/* 成就卡：交错浮现 + 进度条填充 + 已达成图标呼吸光环 */
+.achievement {
+  animation: profile-row-in 460ms cubic-bezier(.16, 1, .3, 1) backwards;
+  transition: border-color .2s ease, background .2s ease, transform .3s cubic-bezier(.16, 1, .3, 1);
+}
+.achievement:nth-child(1) { animation-delay: 60ms; }
+.achievement:nth-child(2) { animation-delay: 110ms; }
+.achievement:nth-child(3) { animation-delay: 160ms; }
+.achievement:nth-child(4) { animation-delay: 210ms; }
+.achievement:nth-child(n + 5) { animation-delay: 260ms; }
+.achievement:hover { transform: translateY(-3px); }
+
+.achievement-bar > i {
+  transform-origin: left center;
+  animation: profile-bar-fill 900ms cubic-bezier(.16, 1, .3, 1) 320ms backwards;
+}
+.achievement.complete .achievement-icon { animation: achv-pulse 2.8s ease-in-out 800ms infinite; }

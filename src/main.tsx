@@ -271,9 +271,12 @@ if (temporaryBanReason.includes("刷新")) {
   } catch { /* ignore */ }
 }
 
+// 进入页面/收到首份快照后的短时间内强制 chat 贴底，避免新会话停留在聊天记录顶部。
+let chatStickUntil = 0;
+
 const notify = (forceStickChat = false) => {
   syncViewportScroll();
-  const stickChat = forceStickChat || shouldStickChats();
+  const stickChat = forceStickChat || Date.now() < chatStickUntil || shouldStickChats();
   render(<App />, app);
   if (stickChat) queueMicrotask(scrollChatsToBottom);
 };
@@ -509,6 +512,8 @@ const boot = async () => {
 };
 
 const enterFromHash = async () => {
+  // 页面切换后聊天默认贴底（覆盖异步加载完成前的一系列 notify）。
+  chatStickUntil = Date.now() + 2_500;
   // 切换房间/页面时重置全局封禁桥接消息，避免串场或重复刷屏。
   extraSystemMessages = [];
   globalModSeen = new Map();
@@ -1162,6 +1167,8 @@ const handleServerMessage = async (raw: string) => {
     return;
   }
   if (message.type === "hello" || message.type === "sync") {
+    // 房间首份快照填充聊天流后同样强制贴底。
+    chatStickUntil = Date.now() + 2_500;
     await applyAuthoritativeSnapshot(message.envelopes);
     lastRoomLiveStateAt = Date.now();
     await ensureJoined();
@@ -1549,7 +1556,7 @@ const showCheatPopup = async (role: "cheater" | "participant", cheaterName: stri
   }
   await Swal.fire({
     title: "对决已终止",
-    html: `本场对决因 <b>${cheaterName || "未知玩家"}</b> 疑似作弊已终止，相关举报已提交至工单中心，等待管理员审查。`,
+    html: `本场对决因 <b>${cheaterName || "未知玩家"}</b> 疑似作弊已终止，相关举报已提交至工单中心，等待管理员审查。<br/>作为补偿，你获得 <b>+10 Rating</b>。`,
     imageUrl: "/match-ban.png",
     imageWidth: 160,
     imageHeight: 160,
@@ -1616,6 +1623,10 @@ const moderateGlobal = async (action: "ban" | "unban" | "mute" | "unmute") => {
   }
 
   await ensureGlobalAdminJoined();
+  // 封禁/解封前强制拉一次全局最新快照：lamport 由本地状态决定，若本地快照是旧的
+  // （localStorage 缓存 / 断线重连未完成），发出的事件 lamport 会偏小，重放事件流时会
+  // 排在更早的封禁事件之前，表现为“手动解封之后又被人自动封禁”。
+  await refreshGlobalModeration();
   const targetId = `name:${normalizeName(targetName)}`;
   const base = {
     roomId: "global",
@@ -2217,7 +2228,10 @@ const App = () => {
   return (
     <>
       <Shell title="VJudge Duel" subtitle={mode === "exam" ? "rule exam" : mode === "profile" ? "user" : mode === "admin" ? "admin" : mode === "tickets" ? "tickets" : mode === "home" ? "control room" : `${roomId} / ${state.phase}`}>
-        {mode === "exam" ? <ExamPage /> : mode === "profile" ? <ProfilePage /> : mode === "admin" ? <AdminPage /> : mode === "tickets" ? <TicketsPage /> : mode === "home" ? <Home /> : <Room />}
+        {/* key 变化（页面切换/换房）时重挂载，触发 view-enter 页面过渡动画。 */}
+        <div class="view-transition" key={mode === "room" ? `room:${roomId}` : mode}>
+          {mode === "exam" ? <ExamPage /> : mode === "profile" ? <ProfilePage /> : mode === "admin" ? <AdminPage /> : mode === "tickets" ? <TicketsPage /> : mode === "home" ? <Home /> : <Room />}
+        </div>
       </Shell>
       <NotificationDrawer />
       <ToastStack />
