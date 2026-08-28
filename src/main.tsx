@@ -2787,7 +2787,7 @@ const runAdminUserAction = async (name: string, action: "ban" | "unban" | "mute"
 
 // 从“举报用户xxx比赛疑似作弊”标题中解析被举报用户名。
 const parseReportedUser = (title: string): string | null => {
-  const m = /^举报用户(.+?)比赛疑似作弊$/.exec(title.trim());
+  const m = /^举报用户 (.+?) 比赛疑似作弊$/.exec(title.trim());
   return m ? m[1] : null;
 };
 

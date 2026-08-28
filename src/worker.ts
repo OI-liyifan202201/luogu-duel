@@ -1736,15 +1736,16 @@ export class TicketStore extends DurableObject<Env> {
     if (!cheaterName || !roomId) return jsonError("missing fields", 400);
     const now = Date.now();
     const id = crypto.randomUUID();
-    const title = `举报用户${cheaterName}比赛疑似作弊`;
-    const description = `用户${cheaterName}在https://duel.gengen.qzz.io/#room=${roomId}&secret=${secret} 提交记录异常，疑似有作弊嫌疑`;
+    const title = `举报用户 ${cheaterName} 比赛疑似作弊`;
+    const description = `用户 ${cheaterName} 在 https://duel.gengen.qzz.io/#room=${roomId}&secret=${secret} 提交记录异常，疑似有作弊嫌疑`;
     this.ctx.storage.sql.exec(
       `INSERT INTO tickets (id, project, type, title, description, author, author_id, status, assignee, created_at, updated_at, reply_count) VALUES (?, 'vjudge-duel', 'report', ?, ?, ?, 'vdsystem', 'processing', ?, ?, ?, 0)`,
       id, title, description, CHEAT_TICKET_AUTHOR, CHEAT_TICKET_ASSIGNEE, now, now
     );
     // 自动评论：VDsystem @ 用户，提醒其注意这条工单。
     const commentId = crypto.randomUUID();
-    const commentBody = `@${cheaterName} 你可能在此比赛中作弊，请提供更详细的内容以方便我们的调查`;
+ 
+    const commentBody = `@${cheaterName} 你可能在此比赛中作弊，请提供更详细的内容以方便我们的调查，\n @Gcend @General0826 @sLMxf @liyifan202201 @GCSG01 @imzfx_Square 请管理员参与审查`;
     this.ctx.storage.sql.exec(
       `INSERT INTO comments (id, ticket_id, author, author_id, body, created_at, mentions) VALUES (?, ?, ?, 'vdsystem', ?, ?, ?)`,
       commentId, id, CHEAT_TICKET_AUTHOR, commentBody, now, JSON.stringify([normalizeName(cheaterName)])
